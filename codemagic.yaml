@@ -1,0 +1,29 @@
+# Compilación en la nube (sin Mac) con https://codemagic.io
+# Requiere: cuenta de Apple Developer, la app creada en App Store Connect con el
+# identificador com.ondstudios.splivmax y una clave API de App Store Connect
+# añadida en Codemagic > Teams > Integrations con el nombre "SPLIVMAX ASC".
+workflows:
+  ios-testflight:
+    name: SPLIVMAX iOS (TestFlight)
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: SPLIVMAX ASC
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.ondstudios.splivmax
+      xcode: latest
+    scripts:
+      - name: Perfiles de firma
+        script: xcode-project use-profiles
+      - name: Número de compilación
+        script: agvtool new-version -all $BUILD_NUMBER
+      - name: Compilar IPA
+        script: xcode-project build-ipa --project "SPLIVMAX.xcodeproj" --scheme "SPLIVMAX"
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true

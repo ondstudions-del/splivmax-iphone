@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="SPLIVMAX">
+  <defs>
+    <linearGradient id="om-bg" x1="6" y1="4" x2="58" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7b6bff"/>
+      <stop offset=".55" stop-color="#4c3bd6"/>
+      <stop offset="1" stop-color="#00b6e6"/>
+    </linearGradient>
+    <linearGradient id="om-play" x1="20" y1="20" x2="40" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d9f6ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#om-bg)"/>
+  <path d="M2 40c8-5 14-5 22 0s14 5 22 0 12-4 16-2v8c0 8.8-7.2 16-16 16H18C9.2 62 2 54.8 2 46Z" fill="#000" opacity=".18"/>
+  <g fill="none" stroke="#fff" stroke-linecap="round">
+    <path d="M42.5 21.5a14 14 0 0 1 0 21" stroke-width="3.2" opacity=".9"/>
+    <path d="M48.5 16a22 22 0 0 1 0 32" stroke-width="3.2" opacity=".55"/>
+  </g>
+  <path d="M20 21.6v20.8a2.4 2.4 0 0 0 3.6 2.1l17.6-10.4a2.4 2.4 0 0 0 0-4.2L23.6 19.5a2.4 2.4 0 0 0-3.6 2.1Z" fill="url(#om-play)"/>
+</svg>
