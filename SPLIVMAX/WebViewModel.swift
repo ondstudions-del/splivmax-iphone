@@ -46,7 +46,8 @@ final class WebViewModel: NSObject, ObservableObject {
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
         bridge.owner = self
-        sessionKeeper = SessionKeeper(store: config.websiteDataStore.httpCookieStore)
+        let keeper = SessionKeeper(store: config.websiteDataStore.httpCookieStore)
+        sessionKeeper = keeper
 
         webView.isOpaque = false
         webView.backgroundColor = AppConfig.uiBackground
@@ -97,7 +98,11 @@ final class WebViewModel: NSObject, ObservableObject {
         }
         monitor.start(queue: DispatchQueue(label: "splivmax.network"))
 
-        webView.load(URLRequest(url: NotificationManager.shared.takePendingURL() ?? AppConfig.homeURL))
+        // La primera página espera a que se repongan las cookies guardadas, para que la sesión ya esté iniciada.
+        keeper.start { [weak self] in
+            guard let self, self.webView.url == nil else { return }
+            self.webView.load(URLRequest(url: NotificationManager.shared.takePendingURL() ?? AppConfig.homeURL))
+        }
     }
 
     deinit {
@@ -146,6 +151,9 @@ final class WebViewModel: NSObject, ObservableObject {
         let on = isImmersive
         webView.allowsBackForwardNavigationGestures = !on
         webView.scrollView.refreshControl = on ? nil : refreshControl
+        // En el reproductor la página no debe desplazarse ni rebotar al tocar los controles.
+        webView.scrollView.isScrollEnabled = !on
+        webView.scrollView.bounces = !on
         OrientationController.setLandscape(on)
     }
 

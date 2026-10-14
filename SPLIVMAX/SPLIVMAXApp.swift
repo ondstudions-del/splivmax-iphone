@@ -4,10 +4,15 @@ import AVFoundation
 @main
 struct SPLIVMAXApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+        }
+        .onChange(of: scenePhase) { phase in
+            // Con la app abierta la pantalla no se apaga sola; fuera de ella vuelve el bloqueo automático.
+            UIApplication.shared.isIdleTimerDisabled = phase == .active
         }
     }
 }
