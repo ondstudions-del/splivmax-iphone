@@ -12,6 +12,7 @@ struct SPLIVMAXApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     static var orientationLock: UIInterfaceOrientationMask = .portrait
 
@@ -19,6 +20,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         // Con la categoría "playback" el vídeo suena aunque el iPhone esté en silencio.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        NotificationManager.shared.configure()
         return true
     }
 
@@ -27,17 +29,42 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
-/// Vertical para navegar; horizontal y a pantalla completa dentro del reproductor.
+/// Vertical para navegar; horizontal y a pantalla completa mientras se ve un vídeo.
+@MainActor
 enum OrientationController {
-    static func setPlayerMode(_ on: Bool) {
+    private static var landscape = false
+
+    static func setLandscape(_ on: Bool) {
+        landscape = on
         AppDelegate.orientationLock = on ? .landscape : .portrait
+        apply()
+        // iOS ignora la petición si llega en mitad de una transición (carga de página, vídeo a pantalla completa).
+        Task { @MainActor in
+            for delay: UInt64 in [300_000_000, 600_000_000] {
+                try? await Task.sleep(nanoseconds: delay)
+                guard landscape == on else { return }
+                apply()
+            }
+        }
+    }
+
+    private static func apply() {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        let isLandscape = scene.interfaceOrientation.isLandscape
         if #available(iOS 16.0, *) {
-            scene.windows.forEach { $0.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations() }
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: on ? .landscapeRight : .portrait)) { _ in }
+            for window in scene.windows {
+                var controller = window.rootViewController
+                while let current = controller {
+                    current.setNeedsUpdateOfSupportedInterfaceOrientations()
+                    controller = current.presentedViewController
+                }
+            }
+            guard isLandscape != landscape else { return }
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: landscape ? .landscape : .portrait)) { _ in }
         } else {
-            let orientation: UIInterfaceOrientation = on ? .landscapeRight : .portrait
+            guard isLandscape != landscape else { return }
+            let orientation: UIInterfaceOrientation = landscape ? .landscapeRight : .portrait
             UIDevice.current.setValue(orientation.rawValue, forKey: "orientation")
             UIViewController.attemptRotationToDeviceOrientation()
         }

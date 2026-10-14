@@ -8,13 +8,19 @@ final class WebViewModel: NSObject, ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var hasLoadedOnce = false
     @Published private(set) var isPlayer = false
+    @Published private(set) var isFullscreen = false
     @Published private(set) var isOffline = false
+
+    /// Página del reproductor o vídeo a pantalla completa: horizontal y sin barras del sistema.
+    var isImmersive: Bool { isPlayer || isFullscreen }
 
     let webView: WKWebView
     private let refreshControl = UIRefreshControl()
     private var observations: [NSKeyValueObservation] = []
     private let monitor = NWPathMonitor()
     private var failedURL: URL?
+    private var sessionKeeper: SessionKeeper?
+    private var openURLObserver: NSObjectProtocol?
 
     override init() {
         let config = WKWebViewConfiguration()
@@ -29,11 +35,18 @@ final class WebViewModel: NSObject, ObservableObject {
             config.preferences.isElementFullscreenEnabled = true
         }
         config.userContentController.addUserScript(
+            WKUserScript(source: AppConfig.documentStartScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        )
+        config.userContentController.addUserScript(
             WKUserScript(source: AppConfig.injectedScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
+        let bridge = ScriptBridge()
+        config.userContentController.add(bridge, name: AppConfig.bridgeName)
 
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
+        bridge.owner = self
+        sessionKeeper = SessionKeeper(store: config.websiteDataStore.httpCookieStore)
 
         webView.isOpaque = false
         webView.backgroundColor = AppConfig.uiBackground
@@ -64,6 +77,17 @@ final class WebViewModel: NSObject, ObservableObject {
                 Task { @MainActor in self?.urlChanged(url) }
             },
         ]
+        if #available(iOS 16.0, *) {
+            // Pantalla completa nativa de WebKit (por ejemplo, desde el iframe de un reproductor externo).
+            observations.append(webView.observe(\.fullscreenState, options: [.new]) { [weak self] wv, _ in
+                let on = wv.fullscreenState == .enteringFullscreen || wv.fullscreenState == .inFullscreen
+                Task { @MainActor in self?.setFullscreen(on) }
+            })
+        }
+
+        openURLObserver = NotificationCenter.default.addObserver(forName: .splivmaxOpenURL, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.openPendingURL() }
+        }
 
         monitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
@@ -73,11 +97,17 @@ final class WebViewModel: NSObject, ObservableObject {
         }
         monitor.start(queue: DispatchQueue(label: "splivmax.network"))
 
-        webView.load(URLRequest(url: AppConfig.homeURL))
+        webView.load(URLRequest(url: NotificationManager.shared.takePendingURL() ?? AppConfig.homeURL))
     }
 
     deinit {
         monitor.cancel()
+    }
+
+    private func openPendingURL() {
+        guard let url = NotificationManager.shared.takePendingURL() else { return }
+        isOffline = false
+        webView.load(URLRequest(url: url))
     }
 
     func retry() {
@@ -102,9 +132,64 @@ final class WebViewModel: NSObject, ObservableObject {
         let player = AppConfig.isPlayer(url)
         guard player != isPlayer else { return }
         isPlayer = player
-        webView.allowsBackForwardNavigationGestures = !player
-        webView.scrollView.refreshControl = player ? nil : refreshControl
-        OrientationController.setPlayerMode(player)
+        isFullscreen = false
+        updateImmersiveMode()
+    }
+
+    fileprivate func setFullscreen(_ on: Bool) {
+        guard on != isFullscreen else { return }
+        isFullscreen = on
+        updateImmersiveMode()
+    }
+
+    private func updateImmersiveMode() {
+        let on = isImmersive
+        webView.allowsBackForwardNavigationGestures = !on
+        webView.scrollView.refreshControl = on ? nil : refreshControl
+        OrientationController.setLandscape(on)
+    }
+
+    /// Mensajes de la web (window.SPLIVMAXApp y avisos de pantalla completa).
+    fileprivate func handle(_ message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        if type == "fullscreen" {
+            setFullscreen(body["on"] as? Bool ?? false)
+            return
+        }
+        // Las notificaciones sólo puede pedirlas el propio sitio, no los iframes de terceros.
+        guard message.frameInfo.isMainFrame, AppConfig.isInternalHost(message.frameInfo.securityOrigin.host) else { return }
+        let notifications = NotificationManager.shared
+        let title = String((body["title"] as? String ?? "").prefix(120))
+        let text = String((body["body"] as? String ?? "").prefix(400))
+        let link = body["link"] as? String
+        switch type {
+        case "notify":
+            guard !title.isEmpty || !text.isEmpty else { return }
+            notifications.deliver(id: "web-\(UUID().uuidString)", title: title, body: text, link: link)
+        case "schedule":
+            guard let id = body["id"] as? String, !id.isEmpty, let at = body["at"] as? Double, at.isFinite else { return }
+            notifications.deliver(id: "web-\(id)", title: title, body: text, link: link, at: Date(timeIntervalSince1970: at))
+        case "cancel":
+            if let id = body["id"] as? String { notifications.cancel(id: "web-\(id)") }
+        case "permission":
+            Task { await notifications.requestAuthorizationIfNeeded() }
+        case "check":
+            Task { await notifications.check() }
+        default:
+            break
+        }
+    }
+
+    private func rememberUserAgent() {
+        webView.evaluateJavaScript("navigator.userAgent") { value, _ in
+            guard let agent = value as? String, !agent.isEmpty else { return }
+            Task { @MainActor in
+                let manager = NotificationManager.shared
+                let first = manager.userAgent == nil
+                manager.userAgent = agent
+                if first { await manager.check() }
+            }
+        }
     }
 
     private func handleFailure(_ error: Error) {
@@ -163,7 +248,10 @@ extension WebViewModel: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         refreshControl.endRefreshing()
         isOffline = false
-        if !hasLoadedOnce { hasLoadedOnce = true }
+        if !hasLoadedOnce {
+            hasLoadedOnce = true
+            rememberUserAgent()
+        }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -176,6 +264,19 @@ extension WebViewModel: WKNavigationDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         webView.reload()
+    }
+}
+
+// MARK: - Puente JavaScript → app
+
+/// Intermediario con referencia débil: WKUserContentController retiene a su manejador y,
+/// si fuera el propio modelo, nunca se liberaría.
+@MainActor
+private final class ScriptBridge: NSObject, WKScriptMessageHandler {
+    weak var owner: WebViewModel?
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        owner?.handle(message)
     }
 }
 

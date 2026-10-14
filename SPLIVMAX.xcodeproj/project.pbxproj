@@ -14,6 +14,8 @@
 		5A1B0000000000000000B005 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A005 /* ContentView.swift */; };
 		5A1B0000000000000000B006 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A006 /* SplashView.swift */; };
 		5A1B0000000000000000B007 /* OfflineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A007 /* OfflineView.swift */; };
+		5A1B0000000000000000B011 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A011 /* NotificationManager.swift */; };
+		5A1B0000000000000000B012 /* SessionKeeper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A012 /* SessionKeeper.swift */; };
 		5A1B0000000000000000B008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A008 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -25,6 +27,8 @@
 		5A1B0000000000000000A005 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A006 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A007 /* OfflineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineView.swift; sourceTree = "<group>"; };
+		5A1B0000000000000000A011 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
+		5A1B0000000000000000A012 /* SessionKeeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionKeeper.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5A1B0000000000000000A009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5A1B0000000000000000A010 /* SPLIVMAX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SPLIVMAX.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -57,6 +61,8 @@
 				5A1B0000000000000000A005 /* ContentView.swift */,
 				5A1B0000000000000000A003 /* WebViewModel.swift */,
 				5A1B0000000000000000A004 /* WebView.swift */,
+				5A1B0000000000000000A011 /* NotificationManager.swift */,
+				5A1B0000000000000000A012 /* SessionKeeper.swift */,
 				5A1B0000000000000000A006 /* SplashView.swift */,
 				5A1B0000000000000000A007 /* OfflineView.swift */,
 				5A1B0000000000000000A008 /* Assets.xcassets */,
@@ -150,6 +156,8 @@
 				5A1B0000000000000000B005 /* ContentView.swift in Sources */,
 				5A1B0000000000000000B006 /* SplashView.swift in Sources */,
 				5A1B0000000000000000B007 /* OfflineView.swift in Sources */,
+				5A1B0000000000000000B011 /* NotificationManager.swift in Sources */,
+				5A1B0000000000000000B012 /* SessionKeeper.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -277,7 +285,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -286,7 +294,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ondstudios.splivmax;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -304,7 +312,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -313,7 +321,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ondstudios.splivmax;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

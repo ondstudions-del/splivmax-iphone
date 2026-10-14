@@ -1,4 +1,4 @@
-import SwiftUI
+﻿import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = WebViewModel()
@@ -11,7 +11,7 @@ struct ContentView: View {
             WebView(webView: model.webView)
                 .ignoresSafeArea()
 
-            if model.isLoading && model.hasLoadedOnce && !model.isPlayer {
+            if model.isLoading && model.hasLoadedOnce && !model.isImmersive {
                 LoadingBar(progress: model.progress)
                     .transition(.opacity)
             }
@@ -29,8 +29,8 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .statusBarHidden(model.isPlayer)
-        .modifier(SystemOverlaysHidden(hidden: model.isPlayer))
+        .statusBarHidden(model.isImmersive)
+        .modifier(SystemOverlaysHidden(hidden: model.isImmersive))
         .animation(.easeInOut(duration: 0.25), value: model.isOffline)
         .animation(.easeInOut(duration: 0.2), value: model.isLoading)
         .onChange(of: model.hasLoadedOnce) { loaded in
@@ -54,7 +54,7 @@ struct ContentView: View {
     }
 }
 
-/// Barra fina con el degradado de la marca mientras carga una página.
+/// Barra fina con el degradado de la marca mientras carga una pÃ¡gina.
 struct LoadingBar: View {
     let progress: Double
 
