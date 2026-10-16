@@ -9,11 +9,19 @@ final class ImagePipeline: @unchecked Sendable {
     private let session: URLSession
     private let lock = NSLock()
     private var _lowData = false
+    private var _videoActive = false
 
     /// En ahorro de datos las imágenes se piden más pequeñas y no se precargan.
     var lowData: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _lowData }
         set { lock.lock(); _lowData = newValue; lock.unlock() }
+    }
+
+    /// Con el reproductor abierto el vídeo tiene prioridad: no se precargan imágenes
+    /// y las que se pidan van en segundo plano para no quitarle ancho de banda.
+    var videoActive: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _videoActive }
+        set { lock.lock(); _videoActive = newValue; lock.unlock() }
     }
 
     private init() {
@@ -49,8 +57,10 @@ final class ImagePipeline: @unchecked Sendable {
         if let image = cached(url, maxPixel: maxPixel) { return image }
         if url.pathExtension.lowercased() == "svg" { return nil }
         let target = effective(maxPixel)
+        var request = URLRequest(url: url)
+        if videoActive { request.networkServiceType = .background }
         do {
-            let (data, response) = try await session.data(from: url)
+            let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode >= 400 { return nil }
             guard let image = Self.downsample(data, maxPixel: target) ?? UIImage(data: data) else { return nil }
             let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
@@ -62,7 +72,7 @@ final class ImagePipeline: @unchecked Sendable {
     }
 
     func prefetch(_ urls: [URL], maxPixel: CGFloat) {
-        guard !lowData else { return }
+        guard !lowData, !videoActive else { return }
         for url in urls.prefix(12) where cached(url, maxPixel: maxPixel) == nil {
             Task.detached(priority: .utility) { _ = await self.load(url, maxPixel: maxPixel) }
         }

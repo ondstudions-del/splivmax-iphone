@@ -81,6 +81,10 @@ final class PlayerController: NSObject, ObservableObject {
     @Published private(set) var videoHeight: Int?
     /// Bytes de vídeo descargados en esta reproducción.
     @Published private(set) var sessionBytes: Int64 = 0
+    /// Ya se ve el vídeo: a partir de aquí las esperas muestran solo el indicador pequeño.
+    @Published private(set) var hasVideo = false
+    /// Sin conexión: el vídeo sigue solo en cuanto vuelva la red.
+    @Published private(set) var waitingForNetwork = false
 
     let player = AVPlayer()
     private(set) var request: PlayRequest
@@ -101,6 +105,15 @@ final class PlayerController: NSObject, ObservableObject {
     private var closed = false
     private var quickStartedAt: Date?
     private var quickStartDisabled = false
+    /// Solo una pausa pedida (usuario, auriculares, salir de la app) detiene el vídeo; cargas y cambios de red no.
+    private var userPaused = false
+    private var waitingSince: Date?
+    private var networkChangedAt: Date?
+    private var recoveries: [Date] = []
+    private var retryStartWhenOnline = false
+    private var startAttempts = 0
+    private var switchingItem = false
+    private var lastDataAt = Date()
 
     private var meterTask: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
@@ -136,6 +149,9 @@ final class PlayerController: NSObject, ObservableObject {
         player.allowsExternalPlayback = true
         player.usesExternalPlaybackWhileExternalScreenIsActive = true
         player.preventsDisplaySleepDuringVideoPlayback = true
+        player.isMuted = false
+        player.volume = 1
+        ImagePipeline.shared.videoActive = true
         observePlayer()
         observeSystem()
         setupRemoteCommands()
@@ -147,15 +163,21 @@ final class PlayerController: NSObject, ObservableObject {
     func start() async {
         phase = .loading
         isBuffering = true
+        hasVideo = false
+        waitingForNetwork = false
+        retryStartWhenOnline = false
+        userPaused = false
+        recoveries = []
         keepScreenAwake(true)
         lowData = network.prefersLowData
-        try? AVAudioSession.sharedInstance().setActive(true)
+        activateAudio()
         var query: [String: String] = [:]
         if let ep = request.episodeId { query["episode"] = ep }
         if lowData { query["lite"] = "1" }
         do {
             let d: PlaybackData = try await api.send(.get, "/playback/\(request.titleId)", query: query)
             guard !closed else { return }
+            startAttempts = 0
             data = d
             request.episodeId = d.episode?.id
             countdownCancelled = false
@@ -173,12 +195,39 @@ final class PlayerController: NSObject, ObservableObject {
         } catch is CancellationError {
         } catch {
             let e = APIError.from(error)
+            let networkIssue = ["offline", "timeout", "network", "unreachable"].contains(e.code)
+            if !network.isOnline || (networkIssue && startAttempts < 4) {
+                // Sin red al entrar: se queda cargando y arranca solo cuando vuelva la conexión.
+                retryStartWhenOnline = true
+                waitingForNetwork = !network.isOnline
+                if network.isOnline {
+                    startAttempts += 1
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        guard let self, self.retryStartWhenOnline, !self.closed else { return }
+                        await self.start()
+                    }
+                }
+                return
+            }
             fail(message: e.message, code: e.code)
         }
     }
 
     func retry() {
+        startAttempts = 0
         Task { await start() }
+    }
+
+    /// El vídeo arranca con sonido aunque el iPhone esté en modo silencio.
+    private func activateAudio() {
+        let audio = AVAudioSession.sharedInstance()
+        if audio.category != .playback || audio.mode != .moviePlayback {
+            try? audio.setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
+        }
+        try? audio.setActive(true)
+        player.isMuted = false
+        player.volume = 1
     }
 
     /// HLS primero (se adapta solo); en ahorro de datos, el MP4 más ligero antes que el de más calidad.
@@ -191,13 +240,22 @@ final class PlayerController: NSObject, ObservableObject {
 
     private func load(_ source: PlaybackSource, at time: Double) {
         removeItemObservers()
-        let shouldPlay = !started || isPlaying
-        let asset = AVURLAsset(url: source.url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+        let shouldPlay = !userPaused
+        // El vídeo puede usar cualquier red disponible (Wi-Fi, datos móviles o modo datos reducidos).
+        let options: [String: Any] = [
+            AVURLAssetPreferPreciseDurationAndTimingKey: false,
+            AVURLAssetAllowsCellularAccessKey: true,
+            AVURLAssetAllowsExpensiveNetworkAccessKey: true,
+            AVURLAssetAllowsConstrainedNetworkAccessKey: true,
+        ]
+        let asset = AVURLAsset(url: source.url, options: options)
         let item = AVPlayerItem(asset: asset)
         // Búfer corto para arrancar (y no descargar de más antes de saltar al punto guardado);
         // al empezar a reproducir se amplía según la red.
         item.preferredForwardBufferDuration = 4
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+        // Empieza por la primera calidad que cumple los topes en lugar de medir la red antes de arrancar.
+        item.startsOnFirstEligibleVariant = true
         currentSource = source
         pendingSeek = time > 5 ? time : nil
         rampedUp = false
@@ -205,8 +263,14 @@ final class PlayerController: NSObject, ObservableObject {
         stallTimes = []
         quickStartedAt = nil
         quickStartDisabled = false
+        lastDataAt = Date()
         applyBitrate(to: item, startup: true)
         observe(item)
+        if pendingSeek != nil && player.rate != 0 {
+            // Se detiene sin que cuente como pausa: el vídeo sigue en cuanto llega al punto donde iba.
+            switchingItem = true
+            player.pause()
+        }
         player.replaceCurrentItem(with: item)
         isBuffering = true
         // Sin punto guardado se pide reproducir ya: AVPlayer empieza en cuanto tiene datos.
@@ -233,8 +297,20 @@ final class PlayerController: NSObject, ObservableObject {
 
     /// Se llama al cambiar la red o la precarga: el búfer se ajusta sin cortar la reproducción.
     func refreshBuffer() {
-        guard started, !closed else { return }
-        player.currentItem?.preferredForwardBufferDuration = steadyBuffer
+        guard started, !closed, let item = player.currentItem else { return }
+        let target = steadyBuffer
+        if item.preferredForwardBufferDuration != target { item.preferredForwardBufferDuration = target }
+    }
+
+    /// Tope de datos móviles en calidad automática (≈1080p ligero); en Wi-Fi no hay tope.
+    private static let cellularPeakBitRate: Double = 4_000_000
+
+    /// Resolución de la pantalla en horizontal: no tiene sentido descargar más píxeles de los que se ven.
+    private var screenPixels: CGSize {
+        if player.isExternalPlaybackActive { return .zero }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let size = scenes.first?.screen.nativeBounds.size, size.width > 0 else { return .zero }
+        return CGSize(width: max(size.width, size.height), height: min(size.width, size.height))
     }
 
     /// Arranca con un tope de calidad acorde a la última velocidad medida en esta red (empieza a verse antes)
@@ -243,10 +319,13 @@ final class PlayerController: NSObject, ObservableObject {
         guard let item, currentSource?.hls == true else { return }
         if lowData || qualityMode == .saver {
             item.preferredPeakBitRate = 900_000
+            item.preferredPeakBitRateForExpensiveNetworks = 900_000
             item.preferredMaximumResolution = CGSize(width: 854, height: 480)
             return
         }
-        item.preferredMaximumResolution = .zero
+        item.preferredMaximumResolution = screenPixels
+        // Al pasar de Wi-Fi a datos móviles AVPlayer aplica este tope solo, sin cortar el vídeo.
+        item.preferredPeakBitRateForExpensiveNetworks = Self.cellularPeakBitRate
         if startup {
             let wifi = network.isWiFi
             let cap: Double = wifi ? 4_000_000 : 2_500_000
@@ -261,6 +340,12 @@ final class PlayerController: NSObject, ObservableObject {
         } else {
             item.preferredPeakBitRate = 0
         }
+    }
+
+    private func dataArrived(_ item: AVPlayerItem) {
+        guard item === player.currentItem else { return }
+        lastDataAt = Date()
+        quickStartIfPossible(item)
     }
 
     /// AVPlayer espera bastante búfer antes de empezar; con 2-3 s ya cargados se arranca
@@ -299,11 +384,11 @@ final class PlayerController: NSObject, ObservableObject {
             let keepUp = item.isPlaybackLikelyToKeepUp
             Task { @MainActor in
                 guard let self, keepUp, self.player.timeControlStatus != .playing else { return }
-                if self.isPlaying { self.player.play() }
+                if self.isPlaying && !self.userPaused { self.player.play() }
             }
         })
         itemObservers.append(item.observe(\.loadedTimeRanges, options: [.new]) { [weak self] item, _ in
-            Task { @MainActor in self?.quickStartIfPossible(item) }
+            Task { @MainActor in self?.dataArrived(item) }
         })
         NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: item)
             .receive(on: DispatchQueue.main)
@@ -376,7 +461,20 @@ final class PlayerController: NSObject, ObservableObject {
             .dropFirst()
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.refreshBuffer() }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.refreshBuffer()
+                self.networkChanged()
+            }
+            .store(in: &bag)
+        network.$isOnline
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] online in
+                guard let self else { return }
+                if online { self.networkChanged() } else if self.isBuffering { self.waitingForNetwork = true }
+            }
             .store(in: &bag)
         center.publisher(for: UIApplication.didBecomeActiveNotification)
             .receive(on: DispatchQueue.main)
@@ -402,11 +500,11 @@ final class PlayerController: NSObject, ObservableObject {
                 player.seek(to: CMTime(seconds: seek, preferredTimescale: 600),
                             toleranceBefore: CMTime(seconds: 3, preferredTimescale: 600),
                             toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
-                    Task { @MainActor in self?.play() }
+                    Task { @MainActor in self?.resumeUnlessPaused() }
                 }
             } else {
                 pendingSeek = nil
-                play()
+                resumeUnlessPaused()
             }
         case .failed:
             sourceFailed(item.error)
@@ -416,27 +514,37 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func timeControlChanged(_ status: AVPlayer.TimeControlStatus) {
+        if status != .paused { switchingItem = false }
         switch status {
         case .playing:
             isPlaying = true
             isBuffering = false
             sentPause = false
             if smoothSince == nil { smoothSince = Date() }
+            waitingSince = nil
+            if waitingForNetwork { waitingForNetwork = false }
+            if !hasVideo { hasVideo = true }
             keepScreenAwake(true)
             if !started {
                 started = true
-                player.currentItem?.preferredForwardBufferDuration = steadyBuffer
                 report("start")
                 startHeartbeat()
             }
+            refreshBuffer()
         case .waitingToPlayAtSpecifiedRate:
             isBuffering = true
             smoothSince = nil
+            if waitingSince == nil { waitingSince = Date() }
             keepScreenAwake(true)
         case .paused:
+            if switchingItem {
+                isBuffering = true
+                return
+            }
             isPlaying = false
             isBuffering = false
             smoothSince = nil
+            waitingSince = nil
             keepScreenAwake(false)
             if started && !sentPause && phase == .playing {
                 sentPause = true
@@ -479,16 +587,29 @@ final class PlayerController: NSObject, ObservableObject {
 
     func play() {
         guard phase != .loading || player.currentItem?.status == .readyToPlay else { return }
+        userPaused = false
         if phase == .ended {
             seek(to: 0)
             phase = .playing
         }
+        activateAudio()
         player.defaultRate = rate
         player.play()
     }
 
     func pause() {
+        userPaused = true
+        if switchingItem {
+            switchingItem = false
+            isPlaying = false
+            isBuffering = false
+        }
         player.pause()
+    }
+
+    private func resumeUnlessPaused() {
+        guard !userPaused, !closed else { return }
+        play()
     }
 
     func togglePlay() {
@@ -708,6 +829,20 @@ final class PlayerController: NSObject, ObservableObject {
 
     private func sourceFailed(_ error: Error?) {
         guard !closed, let d = data else { return }
+        if isNetworkError(error) && canRecover {
+            // Fallo de red: no se muestra error, se sigue en el mismo punto en cuanto haya conexión.
+            switchingItem = true
+            isBuffering = true
+            if network.isOnline {
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    self?.recover()
+                }
+            } else {
+                waitingForNetwork = true
+            }
+            return
+        }
         let message = (error as NSError?)?.localizedDescription ?? "error"
         Task {
             let _: [String: Bool]? = try? await api.send(.post, "/playback/error", body: [
@@ -751,9 +886,84 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func fail(message: String, code: String) {
+        switchingItem = false
+        waitingForNetwork = false
         phase = .failed(message: message, code: code)
         isBuffering = false
         allowScreenSleep()
+    }
+
+    // MARK: Red: el vídeo no se detiene por cargas ni cambios de conexión
+
+    private static let networkErrorCodes: Set<Int> = [
+        NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
+        NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed, NSURLErrorNotConnectedToInternet,
+        NSURLErrorInternationalRoamingOff, NSURLErrorCallIsActive, NSURLErrorDataNotAllowed,
+    ]
+
+    private func isNetworkError(_ error: Error?) -> Bool {
+        if !network.isOnline { return true }
+        var current = error as NSError?
+        var depth = 0
+        while let e = current, depth < 5 {
+            if e.domain == NSURLErrorDomain && Self.networkErrorCodes.contains(e.code) { return true }
+            // CoreMedia: un segmento no llegó a tiempo.
+            if e.domain == "CoreMediaErrorDomain" && e.code == -12889 { return true }
+            current = e.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        return false
+    }
+
+    private var canRecover: Bool {
+        let now = Date()
+        return recoveries.filter { now.timeIntervalSince($0) < 120 }.count < 5
+    }
+
+    /// Reabre la fuente actual en el punto donde iba (conexión nueva por la red disponible).
+    private func recover() {
+        guard !closed, phase != .ended, isBuffering, !userPaused, player.currentItem != nil,
+              let source = currentSource else { return }
+        if case .failed = phase { return }
+        let now = Date()
+        if let last = recoveries.last, now.timeIntervalSince(last) < 3 { return }
+        recoveries = recoveries.filter { now.timeIntervalSince($0) < 120 } + [now]
+        waitingForNetwork = false
+        waitingSince = nil
+        load(source, at: max(currentTime, pendingSeek ?? 0))
+    }
+
+    /// Cambio de red (Wi-Fi ↔ datos móviles o vuelve la conexión).
+    private func networkChanged() {
+        guard !closed, network.isOnline else { return }
+        networkChangedAt = Date()
+        if retryStartWhenOnline {
+            retryStartWhenOnline = false
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                guard let self, !self.closed else { return }
+                await self.start()
+            }
+        } else if waitingForNetwork {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                self?.recover()
+            }
+        }
+    }
+
+    /// Si el vídeo espera datos y no llega nada con la red disponible (conexión colgada tras cambiar de red),
+    /// se reabre la conexión en el mismo punto sin que el usuario tenga que hacer nada.
+    private func watchdog() {
+        guard !closed, isBuffering, !userPaused, network.isOnline, canRecover,
+              currentSource != nil, player.currentItem != nil else { return }
+        if case .failed = phase { return }
+        let waiting = waitingSince != nil || switchingItem || player.currentItem?.status == .unknown
+        guard waiting else { return }
+        let now = Date()
+        let recentChange = networkChangedAt.map { now.timeIntervalSince($0) < 30 } ?? false
+        let limit: Double = recentChange ? 5 : (started ? 12 : 20)
+        if now.timeIntervalSince(lastDataAt) > limit { recover() }
     }
 
     // MARK: Pantalla encendida
@@ -957,6 +1167,7 @@ final class PlayerController: NSObject, ObservableObject {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 if Task.isCancelled { return }
                 self?.sampleNetwork()
+                self?.watchdog()
             }
         }
     }
@@ -1036,6 +1247,7 @@ final class PlayerController: NSObject, ObservableObject {
         bag = []
         removeRemoteCommands()
         allowScreenSleep()
+        ImagePipeline.shared.videoActive = false
     }
 
     private func finite(_ value: Double) -> Double {

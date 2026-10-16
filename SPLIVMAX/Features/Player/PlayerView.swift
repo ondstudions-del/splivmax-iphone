@@ -51,12 +51,28 @@ struct PlayerView: View {
 
                 captionView
 
-                if controller.isBuffering && !isFailed && controller.phase != .ended {
+                if showLoadingScreen {
+                    PlayerLoadingView(title: controller.data?.title.title ?? request.title,
+                                      subtitle: controller.data?.episode?.label,
+                                      backdrop: controller.data?.title.backdrop,
+                                      status: loadingStatus,
+                                      offline: controller.waitingForNetwork,
+                                      bitsPerSecond: controller.throughput)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                } else if controller.isBuffering && !isFailed && controller.phase != .ended {
                     VStack(spacing: 18) {
                         ProgressView()
                             .tint(.white)
                             .scaleEffect(1.6)
-                        if let bps = controller.throughput {
+                        if controller.waitingForNetwork {
+                            Label("Sin conexión. El vídeo seguirá solo cuando vuelva la red.", systemImage: "wifi.slash")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Color.black.opacity(0.55), in: Capsule())
+                        } else if let bps = controller.throughput {
                             SpeedBadge(bitsPerSecond: bps, height: nil)
                         }
                     }
@@ -107,6 +123,7 @@ struct PlayerView: View {
                     endedView
                 }
             }
+            .animation(.easeOut(duration: 0.35), value: showLoadingScreen)
             .animation(.easeOut(duration: 0.25), value: controlsVisible)
             .animation(.easeOut(duration: 0.2), value: seekFlash)
             .animation(.easeOut(duration: 0.2), value: hud)
@@ -146,6 +163,16 @@ struct PlayerView: View {
     private var isFailed: Bool {
         if case .failed = controller.phase { return true }
         return false
+    }
+
+    /// Pantalla «Cargando» desde que se entra al reproductor hasta que se ve el primer fotograma.
+    private var showLoadingScreen: Bool {
+        !controller.hasVideo && !isFailed && controller.phase != .ended
+    }
+
+    private var loadingStatus: String {
+        if controller.waitingForNetwork { return "Sin conexión" }
+        return controller.data == nil ? "Conectando…" : "Cargando…"
     }
 
     // MARK: Gestos
@@ -252,9 +279,11 @@ struct PlayerView: View {
             VStack(spacing: 0) {
                 topBar
                 Spacer()
-                centerControls
-                Spacer()
-                bottomBar
+                if controller.hasVideo {
+                    centerControls
+                    Spacer()
+                    bottomBar
+                }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 12)
@@ -623,6 +652,77 @@ struct SpeedBadge: View {
         .animation(.easeOut(duration: 0.3), value: Speed.text(bitsPerSecond))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Velocidad de la conexión: \(Speed.text(bitsPerSecond))"))
+    }
+}
+
+/// Pantalla de carga al entrar al reproductor: fondo del título, indicador animado y estado de la conexión.
+private struct PlayerLoadingView: View {
+    let title: String
+    let subtitle: String?
+    let backdrop: URL?
+    let status: String
+    let offline: Bool
+    let bitsPerSecond: Double?
+
+    @State private var spin = false
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let backdrop {
+                RemoteImage(backdrop, maxPixel: 1200)
+                    .blur(radius: 16)
+                    .opacity(0.4)
+            }
+            LinearGradient(colors: [Color.black.opacity(0.35), Color.black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+
+            VStack(spacing: 18) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.white.opacity(0.12), lineWidth: 4)
+                    Circle()
+                        .trim(from: 0, to: 0.3)
+                        .stroke(Theme.gradient, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                        .rotationEffect(.degrees(spin ? 360 : 0))
+                    Image(systemName: offline ? "wifi.slash" : "play.fill")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundColor(.white)
+                }
+                .frame(width: 68, height: 68)
+
+                VStack(spacing: 6) {
+                    Text(status)
+                        .font(.system(size: 18, weight: .heavy))
+                        .foregroundColor(.white)
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(1)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 13.5))
+                            .foregroundColor(.white.opacity(0.65))
+                            .lineLimit(1)
+                    }
+                    if offline {
+                        Text("Empezará solo en cuanto vuelva la conexión.")
+                            .font(.system(size: 13.5))
+                            .foregroundColor(.white.opacity(0.65))
+                    }
+                }
+                .multilineTextAlignment(.center)
+
+                if !offline, let bitsPerSecond {
+                    SpeedBadge(bitsPerSecond: bitsPerSecond, height: nil)
+                }
+            }
+            .padding(.horizontal, 40)
+        }
+        .ignoresSafeArea()
+        .accessibilityElement(children: .combine)
+        .onAppear {
+            withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
+        }
     }
 }
 
