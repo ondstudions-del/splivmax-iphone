@@ -14,7 +14,10 @@ struct PlayRequest: Identifiable, Equatable {
 /// Abre el reproductor a pantalla completa desde cualquier pantalla.
 @MainActor
 final class PlayerCoordinator: ObservableObject {
-    @Published var request: PlayRequest?
+    /// Mientras hay un vídeo en pantalla las imágenes de la app no se precargan (el vídeo tiene prioridad).
+    @Published var request: PlayRequest? {
+        didSet { ImagePipeline.shared.videoActive = request != nil }
+    }
     /// Aumenta al cerrar el reproductor: las fichas recargan el progreso.
     @Published private(set) var closedCount = 0
 
@@ -151,7 +154,6 @@ final class PlayerController: NSObject, ObservableObject {
         player.preventsDisplaySleepDuringVideoPlayback = true
         player.isMuted = false
         player.volume = 1
-        ImagePipeline.shared.videoActive = true
         observePlayer()
         observeSystem()
         setupRemoteCommands()
@@ -1165,9 +1167,9 @@ final class PlayerController: NSObject, ObservableObject {
         meterTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                if Task.isCancelled { return }
-                self?.sampleNetwork()
-                self?.watchdog()
+                guard !Task.isCancelled, let controller = self else { return }
+                controller.sampleNetwork()
+                controller.watchdog()
             }
         }
     }
@@ -1247,7 +1249,6 @@ final class PlayerController: NSObject, ObservableObject {
         bag = []
         removeRemoteCommands()
         allowScreenSleep()
-        ImagePipeline.shared.videoActive = false
     }
 
     private func finite(_ value: Double) -> Double {

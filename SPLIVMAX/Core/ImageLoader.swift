@@ -17,8 +17,7 @@ final class ImagePipeline: @unchecked Sendable {
         set { lock.lock(); _lowData = newValue; lock.unlock() }
     }
 
-    /// Con el reproductor abierto el vídeo tiene prioridad: no se precargan imágenes
-    /// y las que se pidan van en segundo plano para no quitarle ancho de banda.
+    /// Con el reproductor abierto el vídeo tiene prioridad: no se precargan imágenes para no quitarle ancho de banda.
     var videoActive: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _videoActive }
         set { lock.lock(); _videoActive = newValue; lock.unlock() }
@@ -57,8 +56,7 @@ final class ImagePipeline: @unchecked Sendable {
         if let image = cached(url, maxPixel: maxPixel) { return image }
         if url.pathExtension.lowercased() == "svg" { return nil }
         let target = effective(maxPixel)
-        var request = URLRequest(url: url)
-        if videoActive { request.networkServiceType = .background }
+        let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 25)
         do {
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode >= 400 { return nil }
@@ -132,7 +130,16 @@ struct RemoteImage: View {
             .task(id: url) {
                 guard let url else { image = nil; return }
                 if loadedURL == url, image != nil { return }
-                let result = await ImagePipeline.shared.load(url, maxPixel: maxPixel)
+                var result = await ImagePipeline.shared.load(url, maxPixel: maxPixel)
+                // Un fallo puntual de red (cambio de red, servidor lento) no deja el hueco vacío.
+                var attempt = 0
+                let retryable = url.pathExtension.lowercased() != "svg"
+                while result == nil, retryable, attempt < 2, !Task.isCancelled {
+                    attempt += 1
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000)
+                    guard !Task.isCancelled else { return }
+                    result = await ImagePipeline.shared.load(url, maxPixel: maxPixel)
+                }
                 guard !Task.isCancelled else { return }
                 withAnimation(.easeOut(duration: 0.25)) {
                     image = result
