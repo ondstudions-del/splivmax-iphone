@@ -18,6 +18,8 @@ final class WebViewModel: NSObject, ObservableObject {
     private let refreshControl = UIRefreshControl()
     private var observations: [NSKeyValueObservation] = []
     private let monitor = NWPathMonitor()
+    private var network: NetworkInfo?
+    private var playbackActivity: NSObjectProtocol?
     private var failedURL: URL?
     private var sessionKeeper: SessionKeeper?
     private var openURLObserver: NSObjectProtocol?
@@ -91,10 +93,8 @@ final class WebViewModel: NSObject, ObservableObject {
         }
 
         monitor.pathUpdateHandler = { [weak self] path in
-            guard path.status == .satisfied else { return }
-            Task { @MainActor in
-                if self?.isOffline == true { self?.retry() }
-            }
+            let info = NetworkInfo(path)
+            Task { @MainActor in self?.networkChanged(info) }
         }
         monitor.start(queue: DispatchQueue(label: "splivmax.network"))
 
@@ -107,6 +107,40 @@ final class WebViewModel: NSObject, ObservableObject {
 
     deinit {
         monitor.cancel()
+    }
+
+    /// El reproductor web recibe el estado de la red: al cargar cada página (window.__splivmaxNet, para empezar en
+    /// calidad ligera con el modo de datos bajos) y en cada cambio (evento "splivmax:network"), para retomar la
+    /// descarga al pasar de Wi-Fi a datos móviles o al volver la cobertura en vez de quedarse cargando.
+    private func networkChanged(_ info: NetworkInfo) {
+        let previous = network
+        network = info
+        if info.online && isOffline { retry() }
+        guard previous != info else { return }
+
+        let controller = webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        controller.addUserScript(WKUserScript(source: "window.__splivmaxNet=\(info.json);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        controller.addUserScript(WKUserScript(source: AppConfig.documentStartScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        controller.addUserScript(WKUserScript(source: AppConfig.injectedScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+
+        guard previous != nil else { return }
+        webView.evaluateJavaScript(
+            "window.__splivmaxNet=\(info.json);window.dispatchEvent(new CustomEvent('splivmax:network',{detail:window.__splivmaxNet}));",
+            completionHandler: nil
+        )
+    }
+
+    /// Mientras se ve un vídeo, la conexión es para el reproductor: se pausan las consultas de notificaciones
+    /// y se pide a iOS que trate la app como actividad prioritaria iniciada por el usuario.
+    private func updatePlaybackPriority() {
+        NotificationManager.shared.pausedForPlayback = isPlayer
+        if isPlayer, playbackActivity == nil {
+            playbackActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Reproducción de vídeo")
+        } else if !isPlayer, let activity = playbackActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            playbackActivity = nil
+        }
     }
 
     private func openPendingURL() {
@@ -139,6 +173,7 @@ final class WebViewModel: NSObject, ObservableObject {
         isPlayer = player
         isFullscreen = false
         updateImmersiveMode()
+        updatePlaybackPriority()
     }
 
     fileprivate func setFullscreen(_ on: Bool) {
@@ -272,6 +307,37 @@ extension WebViewModel: WKNavigationDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         webView.reload()
+    }
+}
+
+// MARK: - Estado de la red
+
+/// Resumen de la conexión del iPhone que se pasa al reproductor web.
+private struct NetworkInfo: Equatable, Sendable {
+    let online: Bool
+    let type: String
+    /// Modo de datos bajos activado por el usuario.
+    let constrained: Bool
+    /// Datos móviles o punto de acceso compartido.
+    let expensive: Bool
+
+    init(_ path: NWPath) {
+        online = path.status == .satisfied
+        if path.usesInterfaceType(.wifi) {
+            type = "wifi"
+        } else if path.usesInterfaceType(.cellular) {
+            type = "cellular"
+        } else if path.usesInterfaceType(.wiredEthernet) {
+            type = "wired"
+        } else {
+            type = online ? "other" : "none"
+        }
+        constrained = path.isConstrained
+        expensive = path.isExpensive
+    }
+
+    var json: String {
+        "{\"online\":\(online),\"type\":\"\(type)\",\"constrained\":\(constrained),\"expensive\":\(expensive)}"
     }
 }
 

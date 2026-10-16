@@ -76,7 +76,21 @@ final class NotificationManager: NSObject {
 
     // MARK: Consultas al sitio
 
+    /// Mientras se ve un vídeo las consultas se pausan para que toda la conexión sea para el reproductor;
+    /// al salir se consulta enseguida para ponerse al día.
+    var pausedForPlayback = false {
+        didSet {
+            guard pausedForPlayback != oldValue else { return }
+            if pausedForPlayback {
+                stopPolling()
+            } else if UIApplication.shared.applicationState == .active {
+                startPolling()
+            }
+        }
+    }
+
     func startPolling() {
+        guard !pausedForPlayback else { return }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: AppConfig.notificationPollInterval, repeats: true) { _ in
             Task { @MainActor in await NotificationManager.shared.check() }
@@ -152,6 +166,8 @@ final class NotificationManager: NSObject {
 
     private static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
+        // Prioridad baja: si coincide con el vídeo, iOS da preferencia al vídeo.
+        config.networkServiceType = .background
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never
         config.httpCookieStorage = nil
