@@ -25,6 +25,7 @@ struct PlayerView: View {
     @State private var reporting = false
     @AppStorage(Prefs.subtitleSizeKey) private var subtitleSize = 1
     @AppStorage(Prefs.speedMeterKey) private var speedMeterPinned = false
+    @AppStorage(Prefs.preloadKey) private var preloadOnWiFi = true
 
     init(request: PlayRequest) {
         self.request = request
@@ -128,6 +129,7 @@ struct PlayerView: View {
             coordinator.didClose()
             Task { await session.refreshMe() }
         }
+        .onChange(of: preloadOnWiFi) { _ in controller.refreshBuffer() }
         .onChange(of: controller.isPlaying) { playing in
             if playing {
                 scheduleHide()
@@ -284,8 +286,9 @@ struct PlayerView: View {
             Spacer()
 
             if controller.lowData || controller.qualityMode == .saver {
-                Label(controller.sessionBytes > 0 ? DataUsage.format(Double(controller.sessionBytes)) : "Ahorro", systemImage: "leaf.fill")
-                    .font(.system(size: 11.5, weight: .bold).monospacedDigit())
+                Label(saverLabel, systemImage: "leaf.fill")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .monospacedDigit()
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Theme.ok.opacity(0.25), in: Capsule())
@@ -313,6 +316,10 @@ struct PlayerView: View {
             settingsMenu
         }
         .foregroundColor(.white)
+    }
+
+    private var saverLabel: String {
+        controller.sessionBytes > 0 ? DataUsage.format(Double(controller.sessionBytes)) : "Ahorro"
     }
 
     private var centerControls: some View {
@@ -478,6 +485,10 @@ struct PlayerView: View {
                 Label("Medidor siempre visible", systemImage: "gauge.with.dots.needle.33percent")
             }
 
+            Toggle(isOn: $preloadOnWiFi) {
+                Label("Precarga en Wi-Fi", systemImage: "square.and.arrow.down.on.square")
+            }
+
             Divider()
 
             Button { reporting = true } label: {
@@ -603,7 +614,8 @@ struct SpeedBadge: View {
                 Text("· \(height)p").foregroundColor(.white.opacity(0.8))
             }
         }
-        .font(.system(size: 12, weight: .bold).monospacedDigit())
+        .font(.system(size: 12, weight: .bold))
+        .monospacedDigit()
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .background(.black.opacity(0.45), in: Capsule())

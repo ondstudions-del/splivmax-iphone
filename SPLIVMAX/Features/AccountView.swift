@@ -643,6 +643,7 @@ struct SettingsView: View {
     @AppStorage(Prefs.dataSaverModeKey) private var dataSaverMode = DataSaverMode.off.rawValue
     @AppStorage(Prefs.subtitleSizeKey) private var subtitleSize = 1
     @AppStorage(Prefs.speedMeterKey) private var speedMeter = false
+    @AppStorage(Prefs.preloadKey) private var preload = true
     @EnvironmentObject private var network: NetworkMonitor
     @EnvironmentObject private var session: SessionStore
     @State private var cleared = false
@@ -658,8 +659,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Ahora mismo")
                     Spacer()
-                    Label(network.prefersLowData ? "Ahorro activo" : "Calidad automática",
-                          systemImage: network.prefersLowData ? "leaf.fill" : "sparkles.tv")
+                    Label(saverStatus, systemImage: network.prefersLowData ? "leaf.fill" : "sparkles.tv")
                         .foregroundColor(network.prefersLowData ? Theme.ok : Theme.text2)
                         .font(.system(size: 14, weight: .semibold))
                 }
@@ -687,13 +687,15 @@ struct SettingsView: View {
                 }
                 Toggle("Medidor de velocidad siempre visible", isOn: $speedMeter)
                     .tint(Theme.accent)
+                Toggle("Precarga en Wi-Fi", isOn: $preload)
+                    .tint(Theme.accent)
                 if session.isLoggedIn {
                     NavigationLink(value: Route.manageProfiles) {
                         Text("Reproducción automática y control parental")
                     }
                 }
             } header: { Text("Reproducción") } footer: {
-                Text("El medidor muestra la velocidad de tu conexión mientras ves algo: rojo por debajo de 1 Mbps, amarillo hasta 2,5 Mbps y verde por encima.")
+                Text("Con la precarga, en Wi-Fi se descargan hasta 5 minutos por delante de lo que estás viendo para que un bajón de la conexión no corte el vídeo (con datos móviles o ahorro de datos no se usa). El medidor muestra la velocidad de tu conexión: rojo por debajo de 1 Mbps, amarillo hasta 2,5 Mbps y verde por encima.")
             }
 
             Section {
@@ -722,6 +724,10 @@ struct SettingsView: View {
             cellularUsage = DataUsage.cellularBytes
             wifiUsage = DataUsage.wifiBytes
         }
+    }
+
+    private var saverStatus: String {
+        network.prefersLowData ? "Ahorro activo" : "Calidad automática"
     }
 
     private var dataSaverFooter: String {

@@ -103,6 +103,7 @@ final class PlayerController: NSObject, ObservableObject {
     private var quickStartDisabled = false
 
     private var meterTask: Task<Void, Never>?
+    private var idleTask: Task<Void, Never>?
     private var sampledItem: ObjectIdentifier?
     private var sampledBytes: Int64 = 0
     private var sampledAt = Date()
@@ -146,6 +147,7 @@ final class PlayerController: NSObject, ObservableObject {
     func start() async {
         phase = .loading
         isBuffering = true
+        keepScreenAwake(true)
         lowData = network.prefersLowData
         try? AVAudioSession.sharedInstance().setActive(true)
         var query: [String: String] = [:]
@@ -214,11 +216,25 @@ final class PlayerController: NSObject, ObservableObject {
         }
     }
 
-    /// Lo que se descarga por adelantado una vez arrancado: poco en ahorro de datos,
-    /// moderado con datos móviles y automático en Wi-Fi.
+    /// Vídeo que se precarga en Wi-Fi (5 minutos); AVPlayer puede guardar menos si el iPhone va justo de memoria.
+    static let preloadSeconds: Double = 300
+
+    static var preloadEnabled: Bool {
+        UserDefaults.standard.object(forKey: Prefs.preloadKey) as? Bool ?? true
+    }
+
+    /// Lo que se descarga por adelantado una vez arrancado: poco en ahorro de datos, moderado con
+    /// datos móviles y, en Wi-Fi, varios minutos (precarga) para que un bajón de la conexión no corte el vídeo.
     private var steadyBuffer: Double {
         if lowData || qualityMode == .saver { return 10 }
-        return network.isWiFi ? 0 : 40
+        if network.isWiFi { return Self.preloadEnabled ? Self.preloadSeconds : 0 }
+        return 40
+    }
+
+    /// Se llama al cambiar la red o la precarga: el búfer se ajusta sin cortar la reproducción.
+    func refreshBuffer() {
+        guard started, !closed else { return }
+        player.currentItem?.preferredForwardBufferDuration = steadyBuffer
     }
 
     /// Arranca con un tope de calidad acorde a la última velocidad medida en esta red (empieza a verse antes)
@@ -233,10 +249,12 @@ final class PlayerController: NSObject, ObservableObject {
         item.preferredMaximumResolution = .zero
         if startup {
             let wifi = network.isWiFi
+            let cap: Double = wifi ? 4_000_000 : 2_500_000
             if let estimate = BandwidthMemory.estimate(wifi: wifi) {
-                item.preferredPeakBitRate = max(700_000, min(estimate * 0.5, wifi ? 4_000_000 : 2_500_000))
+                let target: Double = min(estimate * 0.5, cap)
+                item.preferredPeakBitRate = max(700_000.0, target)
             } else {
-                item.preferredPeakBitRate = wifi ? 2_500_000 : 1_200_000
+                item.preferredPeakBitRate = wifi ? 2_500_000.0 : 1_200_000.0
             }
         } else if !stallTimes.isEmpty && !rampedUp {
             item.preferredPeakBitRate = 2_500_000
@@ -254,11 +272,17 @@ final class PlayerController: NSObject, ObservableObject {
               pendingSeek == nil else { return }
         let now = item.currentTime().seconds
         guard now.isFinite else { return }
-        let ahead = item.loadedTimeRanges
-            .map(\.timeRangeValue)
-            .first { $0.start.seconds <= now + 0.5 && ($0.start + $0.duration).seconds > now }
-            .map { ($0.start + $0.duration).seconds - now } ?? 0
-        let needed: Double = network.isWiFi && !lowData ? 2 : 3
+        var ahead: Double = 0
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = range.start.seconds
+            let end = CMTimeRangeGetEnd(range).seconds
+            if start <= now + 0.5 && end > now {
+                ahead = end - now
+                break
+            }
+        }
+        let needed: Double = (network.isWiFi && !lowData) ? 2 : 3
         guard ahead >= needed else { return }
         quickStartedAt = Date()
         player.playImmediately(atRate: rate)
@@ -345,7 +369,22 @@ final class PlayerController: NSObject, ObservableObject {
                 guard let self else { return }
                 self.lowData = low
                 self.applyBitrate(to: self.player.currentItem, startup: false)
-                if self.started { self.player.currentItem?.preferredForwardBufferDuration = self.steadyBuffer }
+                self.refreshBuffer()
+            }
+            .store(in: &bag)
+        network.$isWiFi
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshBuffer() }
+            .store(in: &bag)
+        center.publisher(for: UIApplication.didBecomeActiveNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                // Al volver a la app iOS puede haber restablecido el apagado automático de la pantalla.
+                guard let self, !self.closed, self.isPlaying || self.isBuffering else { return }
+                UIApplication.shared.isIdleTimerDisabled = false
+                self.keepScreenAwake(true)
             }
             .store(in: &bag)
     }
@@ -383,7 +422,7 @@ final class PlayerController: NSObject, ObservableObject {
             isBuffering = false
             sentPause = false
             if smoothSince == nil { smoothSince = Date() }
-            UIApplication.shared.isIdleTimerDisabled = true
+            keepScreenAwake(true)
             if !started {
                 started = true
                 player.currentItem?.preferredForwardBufferDuration = steadyBuffer
@@ -393,11 +432,12 @@ final class PlayerController: NSObject, ObservableObject {
         case .waitingToPlayAtSpecifiedRate:
             isBuffering = true
             smoothSince = nil
+            keepScreenAwake(true)
         case .paused:
             isPlaying = false
             isBuffering = false
             smoothSince = nil
-            UIApplication.shared.isIdleTimerDisabled = false
+            keepScreenAwake(false)
             if started && !sentPause && phase == .playing {
                 sentPause = true
                 report("pause")
@@ -481,7 +521,7 @@ final class PlayerController: NSObject, ObservableObject {
             if currentSource?.hls == true {
                 rampedUp = mode == .auto
                 applyBitrate(to: player.currentItem, startup: false)
-                if started { player.currentItem?.preferredForwardBufferDuration = steadyBuffer }
+                refreshBuffer()
             } else if let hls = candidates.first(where: \.hls) {
                 switchTo(hls)
             }
@@ -628,7 +668,7 @@ final class PlayerController: NSObject, ObservableObject {
             playNext()
         } else {
             phase = .ended
-            UIApplication.shared.isIdleTimerDisabled = false
+            allowScreenSleep()
         }
     }
 
@@ -699,8 +739,10 @@ final class PlayerController: NSObject, ObservableObject {
         if let quick = quickStartedAt, now.timeIntervalSince(quick) < 8 { quickStartDisabled = true }
         guard stallTimes.count >= 2, qualityMode == .auto, !lowData else { return }
         if currentSource?.hls == true {
-            let measured = throughput.map { max(600_000, $0 * 0.6) } ?? 1_200_000
-            player.currentItem?.preferredPeakBitRate = stallTimes.count >= 3 ? min(1_200_000, measured) : min(2_500_000, measured)
+            var measured: Double = 1_200_000
+            if let throughput { measured = max(600_000.0, throughput * 0.6) }
+            let ceiling: Double = stallTimes.count >= 3 ? 1_200_000 : 2_500_000
+            player.currentItem?.preferredPeakBitRate = min(ceiling, measured)
         } else if let current = currentSource,
                   let lighter = candidates.filter({ !$0.hls && $0.quality < current.quality }).max(by: { $0.quality < $1.quality }) {
             stallTimes = []
@@ -711,6 +753,31 @@ final class PlayerController: NSObject, ObservableObject {
     private func fail(message: String, code: String) {
         phase = .failed(message: message, code: code)
         isBuffering = false
+        allowScreenSleep()
+    }
+
+    // MARK: Pantalla encendida
+
+    /// La pantalla no se apaga mientras se reproduce o carga una película o un episodio.
+    /// En pausa se mantiene encendida unos minutos más y después iOS puede apagarla.
+    private func keepScreenAwake(_ awake: Bool) {
+        idleTask?.cancel()
+        idleTask = nil
+        guard !closed else { return }
+        if awake {
+            UIApplication.shared.isIdleTimerDisabled = true
+            return
+        }
+        idleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000_000)
+            guard !Task.isCancelled, let controller = self, !controller.isPlaying, !controller.isBuffering else { return }
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    private func allowScreenSleep() {
+        idleTask?.cancel()
+        idleTask = nil
         UIApplication.shared.isIdleTimerDisabled = false
     }
 
@@ -885,11 +952,11 @@ final class PlayerController: NSObject, ObservableObject {
     // MARK: Medidor de velocidad y consumo
 
     private func startMeter() {
-        meterTask = Task { [weak self] in
+        meterTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard let self, !Task.isCancelled else { return }
-                self.sampleNetwork()
+                if Task.isCancelled { return }
+                self?.sampleNetwork()
             }
         }
     }
@@ -898,18 +965,26 @@ final class PlayerController: NSObject, ObservableObject {
     private func sampleNetwork() {
         guard !closed, let item = player.currentItem else { return }
         let now = Date()
-        let events = item.accessLog()?.events ?? []
-        let total = events.reduce(Int64(0)) { $0 + max(0, $1.numberOfBytesTransferred) }
+        let events: [AVPlayerItemAccessLogEvent] = item.accessLog()?.events ?? []
+        var total: Int64 = 0
+        for event in events where event.numberOfBytesTransferred > 0 {
+            total += event.numberOfBytesTransferred
+        }
         // observedBitrate es la velocidad real mientras se descarga; los bytes por segundo la subestiman
         // cuando el búfer está lleno (se descarga a ráfagas), así que solo sirven de respaldo.
-        let observed = max(0, events.last?.observedBitrate ?? 0)
+        var observed: Double = 0
+        if let last = events.last, last.observedBitrate > 0 { observed = last.observedBitrate }
         let id = ObjectIdentifier(item)
         if sampledItem == id {
-            let delta = total - sampledBytes
-            let dt = now.timeIntervalSince(sampledAt)
+            let delta: Int64 = total - sampledBytes
+            let dt: Double = now.timeIntervalSince(sampledAt)
             if delta > 0, dt > 0.2 {
-                let sample = max(observed, Double(delta) * 8 / dt)
-                throughput = throughput.map { $0 * 0.5 + sample * 0.5 } ?? sample
+                let sample: Double = max(observed, Double(delta) * 8 / dt)
+                if let previous = throughput {
+                    throughput = previous * 0.5 + sample * 0.5
+                } else {
+                    throughput = sample
+                }
                 sessionBytes += delta
                 unsavedBytes += delta
             } else if isBuffering, let current = throughput {
@@ -935,7 +1010,7 @@ final class PlayerController: NSObject, ObservableObject {
             DataUsage.add(bytes: unsavedBytes, cellular: !network.isWiFi)
             unsavedBytes = 0
         }
-        if let throughput, started { BandwidthMemory.record(throughput, wifi: network.isWiFi) }
+        if started, let measured = throughput { BandwidthMemory.record(measured, wifi: network.isWiFi) }
     }
 
     // MARK: Cierre
@@ -960,7 +1035,7 @@ final class PlayerController: NSObject, ObservableObject {
         player.replaceCurrentItem(with: nil)
         bag = []
         removeRemoteCommands()
-        UIApplication.shared.isIdleTimerDisabled = false
+        allowScreenSleep()
     }
 
     private func finite(_ value: Double) -> Double {

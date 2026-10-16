@@ -53,6 +53,7 @@ enum Prefs {
     static let dataSaverKey = "spx.dataSaver"
     static let dataSaverModeKey = "spx.dataSaverMode"
     static let speedMeterKey = "spx.speedMeter"
+    static let preloadKey = "spx.preloadWiFi"
     static let cellularHDKey = "spx.cellularHD"
     static let recentSearchesKey = "spx.recentSearches"
     static let subtitleSizeKey = "spx.subtitleSize"
