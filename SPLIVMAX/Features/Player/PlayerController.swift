@@ -1,0 +1,856 @@
+import AVFoundation
+import AVKit
+import MediaPlayer
+import Combine
+import UIKit
+
+struct PlayRequest: Identifiable, Equatable {
+    let id = UUID()
+    let titleId: String
+    var episodeId: String?
+    let title: String
+}
+
+/// Abre el reproductor a pantalla completa desde cualquier pantalla.
+@MainActor
+final class PlayerCoordinator: ObservableObject {
+    @Published var request: PlayRequest?
+    /// Aumenta al cerrar el reproductor: las fichas recargan el progreso.
+    @Published private(set) var closedCount = 0
+
+    func play(titleId: String, episodeId: String? = nil, title: String) {
+        request = PlayRequest(titleId: titleId, episodeId: episodeId, title: title)
+    }
+
+    func didClose() {
+        closedCount += 1
+    }
+}
+
+struct MediaOption: Identifiable, Hashable {
+    let id: String
+    let name: String
+}
+
+enum SubtitleChoice: Equatable {
+    case off
+    case external(String)
+    case embedded(String)
+}
+
+enum QualityMode: Equatable {
+    case auto
+    case saver
+    case source(String)
+}
+
+/// Lógica del reproductor: fuentes firmadas, adaptación a la red, subtítulos, pistas de audio,
+/// progreso con el servidor, siguiente episodio, PiP, AirPlay y controles de la pantalla de bloqueo.
+@MainActor
+final class PlayerController: NSObject, ObservableObject {
+    enum Phase: Equatable {
+        case loading
+        case playing
+        case failed(message: String, code: String)
+        case ended
+    }
+
+    @Published private(set) var phase: Phase = .loading
+    @Published private(set) var isPlaying = false
+    @Published private(set) var isBuffering = true
+    @Published private(set) var currentTime: Double = 0
+    @Published private(set) var duration: Double = 0
+    @Published private(set) var bufferedTime: Double = 0
+    @Published private(set) var data: PlaybackData?
+    @Published private(set) var caption: String?
+    @Published private(set) var subtitleChoice: SubtitleChoice = .off
+    @Published private(set) var embeddedSubtitles: [MediaOption] = []
+    @Published private(set) var audioTracks: [MediaOption] = []
+    @Published private(set) var selectedAudio: String?
+    @Published private(set) var nextCountdown: Int?
+    @Published private(set) var qualityMode: QualityMode = .auto
+    @Published private(set) var currentSource: PlaybackSource?
+    @Published private(set) var rate: Float = 1
+    @Published private(set) var isPiPActive = false
+    @Published private(set) var isPiPPossible = false
+    @Published private(set) var lowData = false
+    @Published private(set) var subtitlesLoading = false
+
+    let player = AVPlayer()
+    private(set) var request: PlayRequest
+    private let api = APIClient.shared
+    private let network = NetworkMonitor.shared
+
+    private var candidates: [PlaybackSource] = []
+    private var candidateIndex = 0
+    private var pendingSeek: Double?
+    private var started = false
+    private var countdownCancelled = false
+    private var watched: Double = 0
+    private var lastTick: Double = 0
+    private var stallTimes: [Date] = []
+    private var smoothSince: Date?
+    private var rampedUp = false
+    private var sentPause = false
+    private var closed = false
+
+    private var cues: [SubtitleCue] = []
+    private var cueCache: [String: [SubtitleCue]] = [:]
+    private var legibleGroup: AVMediaSelectionGroup?
+    private var audibleGroup: AVMediaSelectionGroup?
+    private var legibleOptions: [String: AVMediaSelectionOption] = [:]
+    private var audibleOptions: [String: AVMediaSelectionOption] = [:]
+
+    private var itemObservers: [NSKeyValueObservation] = []
+    private var playerObservers: [NSKeyValueObservation] = []
+    private var timeObserver: Any?
+    private var bag = Set<AnyCancellable>()
+    private var itemBag = Set<AnyCancellable>()
+    private var heartbeat: Task<Void, Never>?
+    private var pip: AVPictureInPictureController?
+    private var pipObserver: NSKeyValueObservation?
+    private var nowPlayingUpdated = Date.distantPast
+    private var artwork: MPMediaItemArtwork?
+
+    init(request: PlayRequest) {
+        self.request = request
+        super.init()
+        player.automaticallyWaitsToMinimizeStalling = true
+        player.appliesMediaSelectionCriteriaAutomatically = false
+        player.allowsExternalPlayback = true
+        player.usesExternalPlaybackWhileExternalScreenIsActive = true
+        player.preventsDisplaySleepDuringVideoPlayback = true
+        observePlayer()
+        observeSystem()
+        setupRemoteCommands()
+    }
+
+    // MARK: Inicio
+
+    func start() async {
+        phase = .loading
+        isBuffering = true
+        lowData = network.prefersLowData
+        try? AVAudioSession.sharedInstance().setActive(true)
+        var query: [String: String] = [:]
+        if let ep = request.episodeId { query["episode"] = ep }
+        if lowData { query["lite"] = "1" }
+        do {
+            let d: PlaybackData = try await api.send(.get, "/playback/\(request.titleId)", query: query)
+            guard !closed else { return }
+            data = d
+            request.episodeId = d.episode?.id
+            countdownCancelled = false
+            nextCountdown = nil
+            started = false
+            candidates = order(d.sources)
+            candidateIndex = 0
+            guard let first = candidates.first else {
+                fail(message: "Este contenido todavía no tiene una fuente de vídeo disponible.", code: "no_source")
+                return
+            }
+            load(first, at: Double(d.resume))
+            selectInitialSubtitle(d)
+            loadArtwork(d.title.backdrop)
+        } catch is CancellationError {
+        } catch {
+            let e = APIError.from(error)
+            fail(message: e.message, code: e.code)
+        }
+    }
+
+    func retry() {
+        Task { await start() }
+    }
+
+    /// HLS primero (se adapta solo); en ahorro de datos, el MP4 más ligero antes que el de más calidad.
+    private func order(_ sources: [PlaybackSource]) -> [PlaybackSource] {
+        let hls = sources.filter(\.hls).sorted { $0.quality > $1.quality }
+        var files = sources.filter { !$0.hls }.sorted { $0.quality > $1.quality }
+        if lowData || !network.isOnline { files.reverse() }
+        return hls + files
+    }
+
+    private func load(_ source: PlaybackSource, at time: Double) {
+        removeItemObservers()
+        let asset = AVURLAsset(url: source.url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+        let item = AVPlayerItem(asset: asset)
+        // 0 = búfer automático (arranca antes); en ahorro de datos se limita lo que se descarga por adelantado.
+        item.preferredForwardBufferDuration = lowData ? 12 : 0
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+        currentSource = source
+        pendingSeek = time > 5 ? time : nil
+        rampedUp = false
+        smoothSince = nil
+        stallTimes = []
+        applyBitrate(to: item, startup: true)
+        observe(item)
+        player.replaceCurrentItem(with: item)
+        isBuffering = true
+    }
+
+    /// Arranca con un tope de calidad bajo en redes móviles (empieza a verse antes) y lo libera
+    /// cuando la reproducción va fluida. En ahorro de datos el tope es permanente.
+    private func applyBitrate(to item: AVPlayerItem?, startup: Bool) {
+        guard let item, currentSource?.hls == true else { return }
+        if lowData || qualityMode == .saver {
+            item.preferredPeakBitRate = 1_200_000
+            item.preferredMaximumResolution = CGSize(width: 854, height: 480)
+            return
+        }
+        item.preferredMaximumResolution = .zero
+        if startup && !network.isWiFi {
+            item.preferredPeakBitRate = 1_600_000
+        } else if !stallTimes.isEmpty && !rampedUp {
+            item.preferredPeakBitRate = 2_500_000
+        } else {
+            item.preferredPeakBitRate = 0
+        }
+    }
+
+    // MARK: Observadores
+
+    private func observe(_ item: AVPlayerItem) {
+        itemObservers.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            let status = item.status
+            Task { @MainActor in self?.itemStatusChanged(status, item: item) }
+        })
+        itemObservers.append(item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] item, _ in
+            let keepUp = item.isPlaybackLikelyToKeepUp
+            Task { @MainActor in
+                guard let self, keepUp, self.player.timeControlStatus != .playing else { return }
+                if self.isPlaying { self.player.play() }
+            }
+        })
+        NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: item)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.didEnd() }
+            .store(in: &itemBag)
+        NotificationCenter.default.publisher(for: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] note in
+                let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                self?.sourceFailed(err)
+            }
+            .store(in: &itemBag)
+        NotificationCenter.default.publisher(for: AVPlayerItem.playbackStalledNotification, object: item)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.stalled() }
+            .store(in: &itemBag)
+    }
+
+    private func removeItemObservers() {
+        itemObservers.forEach { $0.invalidate() }
+        itemObservers = []
+        itemBag = []
+    }
+
+    private func observePlayer() {
+        playerObservers.append(player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            let status = player.timeControlStatus
+            Task { @MainActor in self?.timeControlChanged(status) }
+        })
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
+            let seconds = time.seconds
+            Task { @MainActor in self?.tick(seconds) }
+        }
+    }
+
+    private func observeSystem() {
+        let center = NotificationCenter.default
+        center.publisher(for: AVAudioSession.interruptionNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] note in self?.interruption(note) }
+            .store(in: &bag)
+        center.publisher(for: AVAudioSession.routeChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] note in
+                guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                      AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+                // Se desconectaron los auriculares: se pausa como en el resto de iOS.
+                self?.pause()
+            }
+            .store(in: &bag)
+        center.publisher(for: UIApplication.didEnterBackgroundNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, !self.isPiPActive, self.player.isExternalPlaybackActive == false else { return }
+                self.pause()
+            }
+            .store(in: &bag)
+        network.$isConstrained
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.lowData = self.network.prefersLowData
+                self.applyBitrate(to: self.player.currentItem, startup: false)
+            }
+            .store(in: &bag)
+    }
+
+    private func itemStatusChanged(_ status: AVPlayerItem.Status, item: AVPlayerItem) {
+        guard item === player.currentItem else { return }
+        switch status {
+        case .readyToPlay:
+            duration = finite(item.duration.seconds)
+            if phase != .playing { phase = .playing }
+            Task { await loadMediaOptions(for: item) }
+            if let seek = pendingSeek, duration == 0 || seek < duration - 20 {
+                pendingSeek = nil
+                player.seek(to: CMTime(seconds: seek, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)) { [weak self] _ in
+                    Task { @MainActor in self?.play() }
+                }
+            } else {
+                pendingSeek = nil
+                play()
+            }
+        case .failed:
+            sourceFailed(item.error)
+        default:
+            break
+        }
+    }
+
+    private func timeControlChanged(_ status: AVPlayer.TimeControlStatus) {
+        switch status {
+        case .playing:
+            isPlaying = true
+            isBuffering = false
+            sentPause = false
+            if smoothSince == nil { smoothSince = Date() }
+            UIApplication.shared.isIdleTimerDisabled = true
+            if !started {
+                started = true
+                report("start")
+                startHeartbeat()
+            }
+        case .waitingToPlayAtSpecifiedRate:
+            isBuffering = true
+            smoothSince = nil
+        case .paused:
+            isPlaying = false
+            isBuffering = false
+            smoothSince = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+            if started && !sentPause && phase == .playing {
+                sentPause = true
+                report("pause")
+            }
+        @unknown default:
+            break
+        }
+        updateNowPlaying(force: true)
+    }
+
+    private func tick(_ seconds: Double) {
+        guard seconds.isFinite, !closed else { return }
+        if isPlaying, seconds > lastTick, seconds - lastTick < 1.5 {
+            watched += seconds - lastTick
+        }
+        lastTick = seconds
+        currentTime = seconds
+        if let item = player.currentItem {
+            let d = finite(item.duration.seconds)
+            if d > 0, abs(d - duration) > 0.5 { duration = d }
+            if let range = item.loadedTimeRanges.last?.timeRangeValue {
+                bufferedTime = finite((range.start + range.duration).seconds)
+            }
+        }
+        if case .external = subtitleChoice {
+            let text = SubtitleParser.caption(in: cues, at: seconds)
+            if text != caption { caption = text }
+        }
+        // Tras 12 s sin cortes se libera el tope de calidad inicial.
+        if !rampedUp, let since = smoothSince, Date().timeIntervalSince(since) > 12 {
+            rampedUp = true
+            applyBitrate(to: player.currentItem, startup: false)
+        }
+        updateCountdown(seconds)
+        updateNowPlaying(force: false)
+    }
+
+    // MARK: Controles
+
+    func play() {
+        guard phase != .loading || player.currentItem?.status == .readyToPlay else { return }
+        if phase == .ended {
+            seek(to: 0)
+            phase = .playing
+        }
+        player.defaultRate = rate
+        player.play()
+    }
+
+    func pause() {
+        player.pause()
+    }
+
+    func togglePlay() {
+        isPlaying ? pause() : play()
+    }
+
+    func seek(to seconds: Double, precise: Bool = true) {
+        let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
+        let tolerance = precise ? CMTime.zero : CMTime(seconds: 0.5, preferredTimescale: 600)
+        currentTime = target
+        if target < duration - Double(data?.settings.countdown ?? 10) - 1 { nextCountdown = nil }
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: tolerance, toleranceAfter: tolerance)
+    }
+
+    func skip(_ delta: Double) {
+        seek(to: currentTime + delta, precise: false)
+    }
+
+    func setRate(_ value: Float) {
+        rate = value
+        player.defaultRate = value
+        if isPlaying { player.rate = value }
+    }
+
+    func setQuality(_ mode: QualityMode) {
+        guard mode != qualityMode else { return }
+        qualityMode = mode
+        switch mode {
+        case .auto, .saver:
+            if currentSource?.hls == true {
+                rampedUp = mode == .auto
+                applyBitrate(to: player.currentItem, startup: false)
+            } else if let hls = candidates.first(where: \.hls) {
+                switchTo(hls)
+            }
+        case .source(let url):
+            if let source = candidates.first(where: { $0.url.absoluteString == url }) { switchTo(source) }
+        }
+    }
+
+    private func switchTo(_ source: PlaybackSource) {
+        guard source != currentSource else { return }
+        let position = currentTime
+        candidateIndex = candidates.firstIndex(of: source) ?? candidateIndex
+        load(source, at: position)
+    }
+
+    var qualityOptions: [PlaybackSource] {
+        candidates.filter { !$0.hls }
+    }
+
+    var hasHLS: Bool { candidates.contains(where: \.hls) }
+
+    // MARK: Subtítulos y audio
+
+    private func selectInitialSubtitle(_ d: PlaybackData) {
+        let pref = (d.preferredSubtitle ?? "off").lowercased()
+        guard pref != "off", !pref.isEmpty else {
+            subtitleChoice = .off
+            caption = nil
+            return
+        }
+        if let match = d.subtitles.first(where: { $0.lang.lowercased() == pref }) {
+            selectExternal(match)
+        }
+    }
+
+    func selectExternal(_ sub: PlaybackSubtitle) {
+        subtitleChoice = .external(sub.id)
+        caption = nil
+        if let group = legibleGroup, let item = player.currentItem { item.select(nil, in: group) }
+        if let cached = cueCache[sub.id] {
+            cues = cached
+            return
+        }
+        cues = []
+        subtitlesLoading = true
+        Task {
+            let loaded = (try? await SubtitleParser.load(sub.url)) ?? []
+            subtitlesLoading = false
+            cueCache[sub.id] = loaded
+            if subtitleChoice == .external(sub.id) { cues = loaded }
+        }
+    }
+
+    func selectEmbedded(_ option: MediaOption) {
+        guard let group = legibleGroup, let opt = legibleOptions[option.id], let item = player.currentItem else { return }
+        item.select(opt, in: group)
+        subtitleChoice = .embedded(option.id)
+        caption = nil
+        cues = []
+    }
+
+    func subtitlesOff() {
+        subtitleChoice = .off
+        caption = nil
+        cues = []
+        if let group = legibleGroup, let item = player.currentItem, group.allowsEmptySelection { item.select(nil, in: group) }
+    }
+
+    func selectAudio(_ option: MediaOption) {
+        guard let group = audibleGroup, let opt = audibleOptions[option.id], let item = player.currentItem else { return }
+        item.select(opt, in: group)
+        selectedAudio = option.id
+    }
+
+    private func loadMediaOptions(for item: AVPlayerItem) async {
+        let asset = item.asset
+        if let group = try? await asset.loadMediaSelectionGroup(for: .legible) {
+            legibleGroup = group
+            let options = group.options.filter { !$0.hasMediaCharacteristic(.containsOnlyForcedSubtitles) }
+            var map: [String: AVMediaSelectionOption] = [:]
+            var list: [MediaOption] = []
+            for (i, opt) in options.enumerated() {
+                let id = "s\(i)"
+                map[id] = opt
+                list.append(MediaOption(id: id, name: opt.displayName))
+            }
+            legibleOptions = map
+            embeddedSubtitles = list
+            if case .external = subtitleChoice {
+                item.select(nil, in: group)
+            } else if subtitleChoice == .off {
+                let pref = (data?.preferredSubtitle ?? "off").lowercased()
+                if pref != "off", let match = options.firstIndex(where: { ($0.extendedLanguageTag ?? $0.locale?.identifier ?? "").lowercased().hasPrefix(pref) }) {
+                    selectEmbedded(list[match])
+                } else if group.allowsEmptySelection {
+                    item.select(nil, in: group)
+                }
+            }
+        }
+        if let group = try? await asset.loadMediaSelectionGroup(for: .audible) {
+            audibleGroup = group
+            var map: [String: AVMediaSelectionOption] = [:]
+            var list: [MediaOption] = []
+            for (i, opt) in group.options.enumerated() {
+                let id = "a\(i)"
+                map[id] = opt
+                list.append(MediaOption(id: id, name: opt.displayName))
+            }
+            audibleOptions = map
+            audioTracks = list.count > 1 ? list : []
+            if let selected = item.currentMediaSelection.selectedMediaOption(in: group) {
+                selectedAudio = map.first { $0.value == selected }?.key
+            }
+        }
+    }
+
+    // MARK: Fin, siguiente episodio y errores
+
+    private func updateCountdown(_ seconds: Double) {
+        guard let d = data, d.next != nil, d.settings.autoplayNext, !countdownCancelled, duration > 60 else {
+            if nextCountdown != nil { nextCountdown = nil }
+            return
+        }
+        let left = duration - seconds
+        let window = Double(max(5, d.settings.countdown))
+        if left <= window && left > 0 {
+            let value = Int(left.rounded(.up))
+            if nextCountdown != value { nextCountdown = value }
+        } else if nextCountdown != nil {
+            nextCountdown = nil
+        }
+    }
+
+    func cancelCountdown() {
+        countdownCancelled = true
+        nextCountdown = nil
+    }
+
+    private func didEnd() {
+        report("ended")
+        stopHeartbeat()
+        started = false
+        if let d = data, d.next != nil, d.settings.autoplayNext, !countdownCancelled {
+            playNext()
+        } else {
+            phase = .ended
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+    }
+
+    func playNext() {
+        guard let next = data?.next else { return }
+        if started {
+            report("stop")
+            stopHeartbeat()
+            started = false
+        }
+        request.episodeId = next.id
+        removeItemObservers()
+        player.replaceCurrentItem(with: nil)
+        resetTrackState()
+        Task { await start() }
+    }
+
+    private func resetTrackState() {
+        currentTime = 0
+        duration = 0
+        bufferedTime = 0
+        caption = nil
+        cues = []
+        cueCache = [:]
+        legibleGroup = nil
+        audibleGroup = nil
+        legibleOptions = [:]
+        audibleOptions = [:]
+        embeddedSubtitles = []
+        audioTracks = []
+        selectedAudio = nil
+        subtitleChoice = .off
+        nextCountdown = nil
+        lastTick = 0
+        watched = 0
+    }
+
+    private func sourceFailed(_ error: Error?) {
+        guard !closed, let d = data else { return }
+        let message = (error as NSError?)?.localizedDescription ?? "error"
+        Task {
+            let _: [String: Bool]? = try? await api.send(.post, "/playback/error", body: [
+                "title_id": d.title.id,
+                "code": "ios_\((error as NSError?)?.code ?? 0)",
+                "message": String(message.prefix(280)),
+                "stream_id": d.streamId,
+            ])
+        }
+        // Si una fuente falla se prueba la siguiente desde el mismo punto.
+        let position = max(currentTime, pendingSeek ?? 0)
+        if candidateIndex + 1 < candidates.count {
+            candidateIndex += 1
+            load(candidates[candidateIndex], at: position)
+        } else {
+            fail(message: network.isOnline
+                 ? "No pudimos reproducir este contenido. Inténtalo de nuevo en unos minutos."
+                 : "Se perdió la conexión. Revisa tu red e inténtalo de nuevo.",
+                 code: network.isOnline ? "playback_failed" : "offline")
+        }
+    }
+
+    /// Cortes repetidos: en HLS se baja el tope de calidad; con MP4 se pasa a una versión más ligera.
+    private func stalled() {
+        let now = Date()
+        stallTimes = stallTimes.filter { now.timeIntervalSince($0) < 90 } + [now]
+        rampedUp = false
+        smoothSince = nil
+        guard stallTimes.count >= 2, qualityMode == .auto else { return }
+        if currentSource?.hls == true {
+            player.currentItem?.preferredPeakBitRate = stallTimes.count >= 3 ? 1_200_000 : 2_500_000
+        } else if let current = currentSource,
+                  let lighter = candidates.filter({ !$0.hls && $0.quality < current.quality }).max(by: { $0.quality < $1.quality }) {
+            stallTimes = []
+            switchTo(lighter)
+        }
+    }
+
+    private func fail(message: String, code: String) {
+        phase = .failed(message: message, code: code)
+        isBuffering = false
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    // MARK: Progreso con el servidor
+
+    private func startHeartbeat() {
+        heartbeat?.cancel()
+        let interval = UInt64(max(5, data?.settings.interval ?? 15))
+        heartbeat = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval * 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                if self.isPlaying { self.report("progress") }
+            }
+        }
+    }
+
+    private func stopHeartbeat() {
+        heartbeat?.cancel()
+        heartbeat = nil
+    }
+
+    private func report(_ event: String) {
+        guard let d = data else { return }
+        let body: [String: Any] = [
+            "title_id": d.title.id,
+            "episode_id": d.episode?.id ?? "",
+            "stream_id": d.streamId,
+            "position": (currentTime * 10).rounded() / 10,
+            "duration": (duration * 10).rounded() / 10,
+            "watched": (watched * 10).rounded() / 10,
+            "event": event,
+        ]
+        watched = 0
+        Task { [weak self] in
+            do {
+                let _: HeartbeatResponse = try await APIClient.shared.send(.post, "/playback/progress", body: body)
+            } catch let e as APIError where e.code == "stream_expired" && event != "stop" && event != "ended" {
+                await self?.renewStream()
+            } catch {}
+        }
+    }
+
+    /// La sesión de reproducción caducó (pausa larga): se pide una nueva sin cortar el vídeo.
+    private func renewStream() async {
+        guard !closed else { return }
+        var query: [String: String] = [:]
+        if let ep = request.episodeId { query["episode"] = ep }
+        do {
+            let d: PlaybackData = try await api.send(.get, "/playback/\(request.titleId)", query: query)
+            data = d
+            started = false
+            if isPlaying {
+                started = true
+                report("start")
+            }
+        } catch {
+            let e = APIError.from(error)
+            if e.code == "too_many_streams" || e.code == "daily_limit" {
+                pause()
+                fail(message: e.message, code: e.code)
+            }
+        }
+    }
+
+    // MARK: Interrupciones
+
+    private func interruption(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            // Llamada, alarma, Siri: iOS ya pausó el audio.
+            break
+        case .ended:
+            let opts = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt).map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
+            if opts.contains(.shouldResume) {
+                try? AVAudioSession.sharedInstance().setActive(true)
+                play()
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    // MARK: PiP
+
+    func attach(layer: AVPlayerLayer) {
+        guard pip == nil, AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        let created: AVPictureInPictureController? = AVPictureInPictureController(playerLayer: layer)
+        guard let controller = created else { return }
+        controller.delegate = self
+        controller.canStartPictureInPictureAutomaticallyFromInline = true
+        pip = controller
+        pipObserver = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] c, _ in
+            let possible = c.isPictureInPicturePossible
+            Task { @MainActor in self?.isPiPPossible = possible }
+        }
+    }
+
+    func togglePiP() {
+        guard let pip else { return }
+        pip.isPictureInPictureActive ? pip.stopPictureInPicture() : pip.startPictureInPicture()
+    }
+
+    // MARK: Pantalla de bloqueo y Centro de control
+
+    private func setupRemoteCommands() {
+        let c = MPRemoteCommandCenter.shared()
+        c.playCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.play() }
+            return .success
+        }
+        c.pauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.pause() }
+            return .success
+        }
+        c.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.togglePlay() }
+            return .success
+        }
+        c.skipForwardCommand.preferredIntervals = [10]
+        c.skipForwardCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.skip(10) }
+            return .success
+        }
+        c.skipBackwardCommand.preferredIntervals = [10]
+        c.skipBackwardCommand.addTarget { [weak self] _ in
+            Task { @MainActor in self?.skip(-10) }
+            return .success
+        }
+        c.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            let position = e.positionTime
+            Task { @MainActor in self?.seek(to: position) }
+            return .success
+        }
+    }
+
+    private func removeRemoteCommands() {
+        let c = MPRemoteCommandCenter.shared()
+        [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand, c.skipForwardCommand, c.skipBackwardCommand, c.changePlaybackPositionCommand]
+            .forEach { $0.removeTarget(nil) }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
+    private func updateNowPlaying(force: Bool) {
+        guard let d = data else { return }
+        if !force && Date().timeIntervalSince(nowPlayingUpdated) < 5 { return }
+        nowPlayingUpdated = Date()
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: d.episode?.label ?? d.title.title,
+            MPMediaItemPropertyArtist: d.episode != nil ? d.title.title : "SPLIVMAX",
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
+            MPMediaItemPropertyPlaybackDuration: duration,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(rate) : 0,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
+        ]
+        if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func loadArtwork(_ url: URL?) {
+        guard let url, artwork == nil else { return }
+        Task {
+            guard let image = await ImagePipeline.shared.load(url, maxPixel: 600) else { return }
+            artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            updateNowPlaying(force: true)
+        }
+    }
+
+    // MARK: Cierre
+
+    func close() {
+        guard !closed else { return }
+        if started { report("stop") }
+        closed = true
+        stopHeartbeat()
+        pip?.stopPictureInPicture()
+        player.pause()
+        removeItemObservers()
+        playerObservers.forEach { $0.invalidate() }
+        playerObservers = []
+        pipObserver?.invalidate()
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        player.replaceCurrentItem(with: nil)
+        bag = []
+        removeRemoteCommands()
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    private func finite(_ value: Double) -> Double {
+        value.isFinite && value > 0 ? value : 0
+    }
+}
+
+extension PlayerController: AVPictureInPictureControllerDelegate {
+    nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
+        Task { @MainActor in self.isPiPActive = true }
+    }
+
+    nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
+        Task { @MainActor in self.isPiPActive = false }
+    }
+
+    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                                restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        completionHandler(true)
+    }
+}

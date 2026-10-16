@@ -1,0 +1,178 @@
+import Foundation
+
+struct APIError: Error, LocalizedError, Identifiable, Equatable {
+    let status: Int
+    let code: String
+    let message: String
+    var fields: [String: String] = [:]
+
+    var id: String { "\(status)-\(code)-\(message)" }
+    var errorDescription: String? { message }
+
+    /// Mensaje principal más los errores de cada campo (formularios).
+    var fullMessage: String {
+        let extra = fields.values.filter { $0 != message }.sorted()
+        return ([message] + extra).joined(separator: "\n")
+    }
+
+    var isOffline: Bool { code == "offline" }
+
+    static let offline = APIError(status: 0, code: "offline", message: "Sin conexión a internet. Revisa tu red e inténtalo de nuevo.")
+    static let timeout = APIError(status: 0, code: "timeout", message: "La conexión está muy lenta. Inténtalo de nuevo.")
+
+    static func from(_ error: Error) -> APIError {
+        if let api = error as? APIError { return api }
+        if let url = error as? URLError {
+            switch url.code {
+            case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed, .internationalRoamingOff:
+                return .offline
+            case .timedOut:
+                return .timeout
+            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid:
+                return APIError(status: 0, code: "tls", message: "No se pudo establecer una conexión segura con SPLIVMAX.")
+            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
+                return APIError(status: 0, code: "unreachable", message: "No pudimos contactar con SPLIVMAX. Inténtalo en unos minutos.")
+            default: break
+            }
+        }
+        return APIError(status: 0, code: "network", message: "Ocurrió un problema de conexión. Inténtalo de nuevo.")
+    }
+}
+
+extension Notification.Name {
+    /// Errores que cambian el estado global: sesión caducada, perfil pendiente, mantenimiento.
+    static let apiSessionEvent = Notification.Name("spx.api.sessionEvent")
+}
+
+/// Cliente de la API privada de SPLIVMAX. Sólo HTTPS; la clave de la app y el token viajan en cabeceras.
+final class APIClient: @unchecked Sendable {
+    static let shared = APIClient()
+
+    enum Method: String { case get = "GET", post = "POST" }
+
+    let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.keyDecodingStrategy = .convertFromSnakeCase
+        return d
+    }()
+
+    private let session: URLSession
+    private let cache: URLCache
+    private let lock = NSLock()
+    private var storedToken: String?
+    let deviceId: String
+
+    var token: String? {
+        get { lock.lock(); defer { lock.unlock() }; return storedToken }
+        set { lock.lock(); storedToken = newValue; lock.unlock() }
+    }
+
+    private init() {
+        cache = URLCache(memoryCapacity: 8 * 1024 * 1024, diskCapacity: 40 * 1024 * 1024)
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 60
+        config.requestCachePolicy = .useProtocolCachePolicy
+        config.urlCache = cache
+        config.httpMaximumConnectionsPerHost = 6
+        config.httpAdditionalHeaders = [
+            "Accept": "application/json",
+            "Accept-Language": "es",
+        ]
+        session = URLSession(configuration: config)
+        deviceId = KeychainStore.deviceId
+    }
+
+    /// Las respuestas dependen de la cuenta y del perfil: al cambiar de sesión se descarta la caché.
+    func clearCache() {
+        cache.removeAllCachedResponses()
+    }
+
+    func send<T: Decodable>(_ method: Method = .get, _ path: String, query: [String: String] = [:],
+                            body: [String: Any]? = nil, authorized: Bool = true, as type: T.Type = T.self) async throws -> T {
+        try await sendPage(method, path, query: query, body: body, authorized: authorized, as: type).data
+    }
+
+    func sendPage<T: Decodable>(_ method: Method = .get, _ path: String, query: [String: String] = [:],
+                                body: [String: Any]? = nil, authorized: Bool = true, as type: T.Type = T.self) async throws -> (data: T, meta: PageMeta?) {
+        let request = try makeRequest(method, path, query: query, body: body, authorized: authorized)
+        var attempt = 0
+        while true {
+            do {
+                let (data, response) = try await session.data(for: request)
+                return try handle(data: data, response: response, as: T.self)
+            } catch let error as APIError {
+                throw error
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as URLError where error.code == .cancelled {
+                throw CancellationError()
+            } catch {
+                attempt += 1
+                // Una conexión móvil inestable suele fallar una vez y recuperarse: se reintenta sólo lo idempotente.
+                if method == .get, attempt < 3, Self.isTransient(error) {
+                    try await Task.sleep(nanoseconds: UInt64(attempt) * 600_000_000)
+                    continue
+                }
+                throw APIError.from(error)
+            }
+        }
+    }
+
+    private func makeRequest(_ method: Method, _ path: String, query: [String: String], body: [String: Any]?, authorized: Bool) throws -> URLRequest {
+        guard var components = URLComponents(string: AppConfig.apiBase + path) else {
+            throw APIError(status: 0, code: "bad_url", message: "Dirección no válida.")
+        }
+        let items = query.filter { !$0.value.isEmpty }.map { URLQueryItem(name: $0.key, value: $0.value) }.sorted { $0.name < $1.name }
+        if !items.isEmpty { components.queryItems = items }
+        guard let url = components.url, url.scheme == "https" else {
+            throw APIError(status: 0, code: "insecure", message: "Sólo se permiten conexiones seguras (HTTPS).")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        request.setValue(AppConfig.appKey, forHTTPHeaderField: "X-App-Key")
+        request.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
+        request.setValue(AppConfig.version, forHTTPHeaderField: "X-App-Version")
+        if authorized, let token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        if method == .post {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body ?? [:])
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
+        return request
+    }
+
+    private func handle<T: Decodable>(data: Data, response: URLResponse, as type: T.Type) throws -> (data: T, meta: PageMeta?) {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if (200..<300).contains(status) {
+            do {
+                let envelope = try decoder.decode(Envelope<T>.self, from: data)
+                return (envelope.data, envelope.meta)
+            } catch {
+                #if DEBUG
+                print("[API] No se pudo decodificar \(T.self):", error)
+                #endif
+                throw APIError(status: status, code: "decode", message: "No pudimos leer la respuesta del servidor. Actualiza la app o inténtalo más tarde.")
+            }
+        }
+        let error: APIError
+        if let body = try? decoder.decode(ErrorEnvelope.self, from: data).error {
+            error = APIError(status: status, code: body.code, message: body.message, fields: body.fields)
+        } else if status >= 500 {
+            error = APIError(status: status, code: "server", message: "El servidor no responde en este momento. Inténtalo en unos minutos.")
+        } else {
+            error = APIError(status: status, code: "http_\(status)", message: "No se pudo completar la solicitud (\(status)).")
+        }
+        if ["token_invalid", "profile_setup", "profile_required", "maintenance"].contains(error.code) {
+            NotificationCenter.default.post(name: .apiSessionEvent, object: nil, userInfo: ["error": error])
+        }
+        throw error
+    }
+
+    private static func isTransient(_ error: Error) -> Bool {
+        guard let url = error as? URLError else { return false }
+        return [.timedOut, .networkConnectionLost, .cannotConnectToHost, .dnsLookupFailed, .notConnectedToInternet].contains(url.code)
+    }
+}
