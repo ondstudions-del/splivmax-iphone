@@ -7,6 +7,14 @@ final class ImagePipeline: @unchecked Sendable {
 
     private let memory = NSCache<NSString, UIImage>()
     private let session: URLSession
+    private let lock = NSLock()
+    private var _lowData = false
+
+    /// En ahorro de datos las imágenes se piden más pequeñas y no se precargan.
+    var lowData: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _lowData }
+        set { lock.lock(); _lowData = newValue; lock.unlock() }
+    }
 
     private init() {
         memory.totalCostLimit = 96 * 1024 * 1024
@@ -22,18 +30,31 @@ final class ImagePipeline: @unchecked Sendable {
         "\(url.absoluteString)#\(Int(maxPixel))" as NSString
     }
 
+    private func effective(_ maxPixel: CGFloat) -> CGFloat {
+        lowData ? (maxPixel * 0.6).rounded() : maxPixel
+    }
+
+    /// UIImage no decodifica SVG: los avatares de la web vienen incluidos en la app con el mismo nombre.
+    private static func bundled(_ url: URL) -> UIImage? {
+        guard url.pathExtension.lowercased() == "svg" else { return nil }
+        return UIImage(named: url.deletingPathExtension().lastPathComponent)
+    }
+
     func cached(_ url: URL, maxPixel: CGFloat) -> UIImage? {
-        memory.object(forKey: key(url, maxPixel))
+        if let image = Self.bundled(url) { return image }
+        return memory.object(forKey: key(url, maxPixel)) ?? memory.object(forKey: key(url, effective(maxPixel)))
     }
 
     func load(_ url: URL, maxPixel: CGFloat) async -> UIImage? {
         if let image = cached(url, maxPixel: maxPixel) { return image }
+        if url.pathExtension.lowercased() == "svg" { return nil }
+        let target = effective(maxPixel)
         do {
             let (data, response) = try await session.data(from: url)
             if let http = response as? HTTPURLResponse, http.statusCode >= 400 { return nil }
-            guard let image = Self.downsample(data, maxPixel: maxPixel) ?? UIImage(data: data) else { return nil }
+            guard let image = Self.downsample(data, maxPixel: target) ?? UIImage(data: data) else { return nil }
             let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
-            memory.setObject(image, forKey: key(url, maxPixel), cost: cost)
+            memory.setObject(image, forKey: key(url, target), cost: cost)
             return image
         } catch {
             return nil
@@ -41,6 +62,7 @@ final class ImagePipeline: @unchecked Sendable {
     }
 
     func prefetch(_ urls: [URL], maxPixel: CGFloat) {
+        guard !lowData else { return }
         for url in urls.prefix(12) where cached(url, maxPixel: maxPixel) == nil {
             Task.detached(priority: .utility) { _ = await self.load(url, maxPixel: maxPixel) }
         }

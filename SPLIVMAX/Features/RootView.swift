@@ -45,6 +45,7 @@ struct RootView: View {
     @EnvironmentObject private var network: NetworkMonitor
     @Environment(\.scenePhase) private var scenePhase
     @State private var splashDone = false
+    @State private var leftApp = false
 
     var body: some View {
         ZStack {
@@ -115,8 +116,17 @@ struct RootView: View {
             withAnimation(.easeOut(duration: 0.45)) { splashDone = true }
         }
         .onChange(of: scenePhase) { phase in
-            guard phase == .active, session.isLoggedIn else { return }
-            Task { await session.refreshMe() }
+            switch phase {
+            case .background:
+                leftApp = true
+            case .active:
+                // Al volver tras salir de la app se elige perfil, salvo si el reproductor sigue abierto (PiP, AirPlay).
+                if leftApp && player.request == nil { session.askWhoIsWatching() }
+                leftApp = false
+                if session.isLoggedIn { Task { await session.refreshMe() } }
+            default:
+                break
+            }
         }
         .onChange(of: network.isOnline) { online in
             if online, session.isLoggedIn { Task { await session.refreshMe() } }

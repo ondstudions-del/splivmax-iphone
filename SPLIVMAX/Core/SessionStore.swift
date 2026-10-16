@@ -26,6 +26,8 @@ final class SessionStore: ObservableObject {
     @Published var authMode: AuthMode = .login
     @Published var toast: Toast?
     @Published var maintenanceMessage: String?
+    /// La elección de perfil es obligatoria (al abrir la app o al volver a ella): sin botón «Cancelar».
+    @Published private(set) var profileChoiceRequired = false
     /// Cambia al entrar, salir o cambiar de perfil: las pantallas recargan su contenido.
     @Published private(set) var contentVersion = 0
     @Published private var favoriteOverrides: [String: Bool] = [:]
@@ -33,6 +35,7 @@ final class SessionStore: ObservableObject {
     let api = APIClient.shared
     private var bag = Set<AnyCancellable>()
     private static let meCacheKey = "spx.me.v1"
+    private static let chooseProfileKey = "spx.profiles.choose"
 
     init() {
         NotificationCenter.default.publisher(for: .apiSessionEvent)
@@ -57,9 +60,13 @@ final class SessionStore: ObservableObject {
             if let cached = Self.cachedMe() {
                 apply(me: cached)
                 phase = .ready
+                askWhoIsWatching()
             }
             await refreshMe()
-            if phase == .launching { phase = user == nil ? .guest : .ready }
+            if phase == .launching {
+                phase = user == nil ? .guest : .ready
+            }
+            if phase == .ready && !profileChoiceRequired { askWhoIsWatching() }
         } else {
             phase = .guest
         }
@@ -84,6 +91,7 @@ final class SessionStore: ObservableObject {
             Self.storeMe(me)
             if me.profile == nil {
                 await loadProfiles()
+                profileChoiceRequired = true
                 phase = (profilesData?.setupPending ?? false) ? .profileSetup : .profileChoice
             } else if phase == .launching || phase == .guest {
                 phase = .ready
@@ -178,6 +186,8 @@ final class SessionStore: ObservableObject {
         subscription = nil
         unread = 0
         favoriteOverrides = [:]
+        profileChoiceRequired = false
+        UserDefaults.standard.removeObject(forKey: Self.chooseProfileKey)
         phase = .guest
         contentVersion += 1
         if let message { show(message, .info) }
@@ -195,8 +205,37 @@ final class SessionStore: ObservableObject {
 
     func loadProfiles() async {
         do {
-            profilesData = try await api.send(.get, "/profiles")
+            let data: ProfilesData = try await api.send(.get, "/profiles")
+            profilesData = data
+            UserDefaults.standard.set(Self.needsChoice(data.items), forKey: Self.chooseProfileKey)
         } catch {}
+    }
+
+    /// Solo se pregunta «¿Quién está viendo?» si hay algo que elegir: varios perfiles o alguno con PIN.
+    private static func needsChoice(_ items: [Profile]) -> Bool {
+        items.count > 1 || items.contains(where: \.locked)
+    }
+
+    private var profilesNeedChoice: Bool {
+        if let data = profilesData { return Self.needsChoice(data.items) }
+        return UserDefaults.standard.bool(forKey: Self.chooseProfileKey)
+    }
+
+    /// Al abrir la app o volver a ella hay que elegir perfil (como en la web y en las apps de TV).
+    func askWhoIsWatching() {
+        guard isLoggedIn, phase == .ready else { return }
+        if profilesNeedChoice {
+            profileChoiceRequired = true
+            phase = .profileChoice
+            Task { await loadProfiles() }
+        } else {
+            Task {
+                await loadProfiles()
+                guard phase == .ready, profilesNeedChoice else { return }
+                profileChoiceRequired = true
+                phase = .profileChoice
+            }
+        }
     }
 
     func completeSetup(name: String, avatar: String) async throws {
@@ -214,18 +253,20 @@ final class SessionStore: ObservableObject {
         api.clearCache()
         favoriteOverrides = [:]
         profile = r.profile
+        profileChoiceRequired = false
         phase = .ready
         contentVersion += 1
         await refreshMe()
     }
 
     func switchProfile() async {
+        profileChoiceRequired = false
         await loadProfiles()
         phase = .profileChoice
     }
 
     func cancelProfileChoice() {
-        if profile != nil { phase = .ready }
+        if profile != nil && !profileChoiceRequired { phase = .ready }
     }
 
     func saveProfile(id: String?, body: [String: Any]) async throws -> Profile {
@@ -292,6 +333,7 @@ final class SessionStore: ObservableObject {
             if api.token != nil, phase != .profileSetup { phase = .profileSetup }
         case "profile_required":
             if api.token != nil, phase != .profileChoice {
+                profileChoiceRequired = true
                 phase = .profileChoice
                 Task { await loadProfiles() }
             }

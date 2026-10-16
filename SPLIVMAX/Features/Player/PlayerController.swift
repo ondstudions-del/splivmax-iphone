@@ -75,6 +75,12 @@ final class PlayerController: NSObject, ObservableObject {
     @Published private(set) var isPiPPossible = false
     @Published private(set) var lowData = false
     @Published private(set) var subtitlesLoading = false
+    /// Velocidad de descarga medida (bits por segundo) para el medidor.
+    @Published private(set) var throughput: Double?
+    /// Altura del vídeo que se está viendo (480, 720, 1080…).
+    @Published private(set) var videoHeight: Int?
+    /// Bytes de vídeo descargados en esta reproducción.
+    @Published private(set) var sessionBytes: Int64 = 0
 
     let player = AVPlayer()
     private(set) var request: PlayRequest
@@ -93,6 +99,15 @@ final class PlayerController: NSObject, ObservableObject {
     private var rampedUp = false
     private var sentPause = false
     private var closed = false
+    private var quickStartedAt: Date?
+    private var quickStartDisabled = false
+
+    private var meterTask: Task<Void, Never>?
+    private var sampledItem: ObjectIdentifier?
+    private var sampledBytes: Int64 = 0
+    private var sampledAt = Date()
+    private var unsavedBytes: Int64 = 0
+    private var lastUsageFlush = Date()
 
     private var cues: [SubtitleCue] = []
     private var cueCache: [String: [SubtitleCue]] = [:]
@@ -123,6 +138,7 @@ final class PlayerController: NSObject, ObservableObject {
         observePlayer()
         observeSystem()
         setupRemoteCommands()
+        startMeter()
     }
 
     // MARK: Inicio
@@ -173,39 +189,79 @@ final class PlayerController: NSObject, ObservableObject {
 
     private func load(_ source: PlaybackSource, at time: Double) {
         removeItemObservers()
+        let shouldPlay = !started || isPlaying
         let asset = AVURLAsset(url: source.url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
         let item = AVPlayerItem(asset: asset)
-        // 0 = búfer automático (arranca antes); en ahorro de datos se limita lo que se descarga por adelantado.
-        item.preferredForwardBufferDuration = lowData ? 12 : 0
+        // Búfer corto para arrancar (y no descargar de más antes de saltar al punto guardado);
+        // al empezar a reproducir se amplía según la red.
+        item.preferredForwardBufferDuration = 4
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
         currentSource = source
         pendingSeek = time > 5 ? time : nil
         rampedUp = false
         smoothSince = nil
         stallTimes = []
+        quickStartedAt = nil
+        quickStartDisabled = false
         applyBitrate(to: item, startup: true)
         observe(item)
         player.replaceCurrentItem(with: item)
         isBuffering = true
+        // Sin punto guardado se pide reproducir ya: AVPlayer empieza en cuanto tiene datos.
+        if pendingSeek == nil && shouldPlay {
+            player.defaultRate = rate
+            player.play()
+        }
     }
 
-    /// Arranca con un tope de calidad bajo en redes móviles (empieza a verse antes) y lo libera
-    /// cuando la reproducción va fluida. En ahorro de datos el tope es permanente.
+    /// Lo que se descarga por adelantado una vez arrancado: poco en ahorro de datos,
+    /// moderado con datos móviles y automático en Wi-Fi.
+    private var steadyBuffer: Double {
+        if lowData || qualityMode == .saver { return 10 }
+        return network.isWiFi ? 0 : 40
+    }
+
+    /// Arranca con un tope de calidad acorde a la última velocidad medida en esta red (empieza a verse antes)
+    /// y lo libera cuando la reproducción va fluida. En ahorro de datos el tope es permanente.
     private func applyBitrate(to item: AVPlayerItem?, startup: Bool) {
         guard let item, currentSource?.hls == true else { return }
         if lowData || qualityMode == .saver {
-            item.preferredPeakBitRate = 1_200_000
+            item.preferredPeakBitRate = 900_000
             item.preferredMaximumResolution = CGSize(width: 854, height: 480)
             return
         }
         item.preferredMaximumResolution = .zero
-        if startup && !network.isWiFi {
-            item.preferredPeakBitRate = 1_600_000
+        if startup {
+            let wifi = network.isWiFi
+            if let estimate = BandwidthMemory.estimate(wifi: wifi) {
+                item.preferredPeakBitRate = max(700_000, min(estimate * 0.5, wifi ? 4_000_000 : 2_500_000))
+            } else {
+                item.preferredPeakBitRate = wifi ? 2_500_000 : 1_200_000
+            }
         } else if !stallTimes.isEmpty && !rampedUp {
             item.preferredPeakBitRate = 2_500_000
         } else {
             item.preferredPeakBitRate = 0
         }
+    }
+
+    /// AVPlayer espera bastante búfer antes de empezar; con 2-3 s ya cargados se arranca
+    /// (si esto provoca un corte enseguida, se vuelve al criterio de AVPlayer).
+    private func quickStartIfPossible(_ item: AVPlayerItem) {
+        guard item === player.currentItem, !quickStartDisabled, !closed,
+              player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+              player.reasonForWaitingToPlay == .toMinimizeStalls,
+              pendingSeek == nil else { return }
+        let now = item.currentTime().seconds
+        guard now.isFinite else { return }
+        let ahead = item.loadedTimeRanges
+            .map(\.timeRangeValue)
+            .first { $0.start.seconds <= now + 0.5 && ($0.start + $0.duration).seconds > now }
+            .map { ($0.start + $0.duration).seconds - now } ?? 0
+        let needed: Double = network.isWiFi && !lowData ? 2 : 3
+        guard ahead >= needed else { return }
+        quickStartedAt = Date()
+        player.playImmediately(atRate: rate)
     }
 
     // MARK: Observadores
@@ -221,6 +277,9 @@ final class PlayerController: NSObject, ObservableObject {
                 guard let self, keepUp, self.player.timeControlStatus != .playing else { return }
                 if self.isPlaying { self.player.play() }
             }
+        })
+        itemObservers.append(item.observe(\.loadedTimeRanges, options: [.new]) { [weak self] item, _ in
+            Task { @MainActor in self?.quickStartIfPossible(item) }
         })
         NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: item)
             .receive(on: DispatchQueue.main)
@@ -278,13 +337,15 @@ final class PlayerController: NSObject, ObservableObject {
                 self.pause()
             }
             .store(in: &bag)
-        network.$isConstrained
+        network.$prefersLowData
             .dropFirst()
             .removeDuplicates()
-            .sink { [weak self] _ in
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] low in
                 guard let self else { return }
-                self.lowData = self.network.prefersLowData
+                self.lowData = low
                 self.applyBitrate(to: self.player.currentItem, startup: false)
+                if self.started { self.player.currentItem?.preferredForwardBufferDuration = self.steadyBuffer }
             }
             .store(in: &bag)
     }
@@ -298,7 +359,10 @@ final class PlayerController: NSObject, ObservableObject {
             Task { await loadMediaOptions(for: item) }
             if let seek = pendingSeek, duration == 0 || seek < duration - 20 {
                 pendingSeek = nil
-                player.seek(to: CMTime(seconds: seek, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)) { [weak self] _ in
+                // Con margen hacia atrás AVPlayer retoma en el inicio de segmento más cercano: arranca antes.
+                player.seek(to: CMTime(seconds: seek, preferredTimescale: 600),
+                            toleranceBefore: CMTime(seconds: 3, preferredTimescale: 600),
+                            toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
                     Task { @MainActor in self?.play() }
                 }
             } else {
@@ -322,6 +386,7 @@ final class PlayerController: NSObject, ObservableObject {
             UIApplication.shared.isIdleTimerDisabled = true
             if !started {
                 started = true
+                player.currentItem?.preferredForwardBufferDuration = steadyBuffer
                 report("start")
                 startHeartbeat()
             }
@@ -361,8 +426,8 @@ final class PlayerController: NSObject, ObservableObject {
             let text = SubtitleParser.caption(in: cues, at: seconds)
             if text != caption { caption = text }
         }
-        // Tras 12 s sin cortes se libera el tope de calidad inicial.
-        if !rampedUp, let since = smoothSince, Date().timeIntervalSince(since) > 12 {
+        // Tras 8 s sin cortes se libera el tope de calidad inicial.
+        if !rampedUp, let since = smoothSince, Date().timeIntervalSince(since) > 8 {
             rampedUp = true
             applyBitrate(to: player.currentItem, startup: false)
         }
@@ -392,7 +457,7 @@ final class PlayerController: NSObject, ObservableObject {
 
     func seek(to seconds: Double, precise: Bool = true) {
         let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
-        let tolerance = precise ? CMTime.zero : CMTime(seconds: 0.5, preferredTimescale: 600)
+        let tolerance = CMTime(seconds: precise ? 0.3 : 1, preferredTimescale: 600)
         currentTime = target
         if target < duration - Double(data?.settings.countdown ?? 10) - 1 { nextCountdown = nil }
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: tolerance, toleranceAfter: tolerance)
@@ -416,6 +481,7 @@ final class PlayerController: NSObject, ObservableObject {
             if currentSource?.hls == true {
                 rampedUp = mode == .auto
                 applyBitrate(to: player.currentItem, startup: false)
+                if started { player.currentItem?.preferredForwardBufferDuration = steadyBuffer }
             } else if let hls = candidates.first(where: \.hls) {
                 switchTo(hls)
             }
@@ -630,9 +696,11 @@ final class PlayerController: NSObject, ObservableObject {
         stallTimes = stallTimes.filter { now.timeIntervalSince($0) < 90 } + [now]
         rampedUp = false
         smoothSince = nil
-        guard stallTimes.count >= 2, qualityMode == .auto else { return }
+        if let quick = quickStartedAt, now.timeIntervalSince(quick) < 8 { quickStartDisabled = true }
+        guard stallTimes.count >= 2, qualityMode == .auto, !lowData else { return }
         if currentSource?.hls == true {
-            player.currentItem?.preferredPeakBitRate = stallTimes.count >= 3 ? 1_200_000 : 2_500_000
+            let measured = throughput.map { max(600_000, $0 * 0.6) } ?? 1_200_000
+            player.currentItem?.preferredPeakBitRate = stallTimes.count >= 3 ? min(1_200_000, measured) : min(2_500_000, measured)
         } else if let current = currentSource,
                   let lighter = candidates.filter({ !$0.hls && $0.quality < current.quality }).max(by: { $0.quality < $1.quality }) {
             stallTimes = []
@@ -814,10 +882,70 @@ final class PlayerController: NSObject, ObservableObject {
         }
     }
 
+    // MARK: Medidor de velocidad y consumo
+
+    private func startMeter() {
+        meterTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.sampleNetwork()
+            }
+        }
+    }
+
+    /// Mide los bytes descargados por segundo según el registro de acceso de AVPlayer.
+    private func sampleNetwork() {
+        guard !closed, let item = player.currentItem else { return }
+        let now = Date()
+        let events = item.accessLog()?.events ?? []
+        let total = events.reduce(Int64(0)) { $0 + max(0, $1.numberOfBytesTransferred) }
+        // observedBitrate es la velocidad real mientras se descarga; los bytes por segundo la subestiman
+        // cuando el búfer está lleno (se descarga a ráfagas), así que solo sirven de respaldo.
+        let observed = max(0, events.last?.observedBitrate ?? 0)
+        let id = ObjectIdentifier(item)
+        if sampledItem == id {
+            let delta = total - sampledBytes
+            let dt = now.timeIntervalSince(sampledAt)
+            if delta > 0, dt > 0.2 {
+                let sample = max(observed, Double(delta) * 8 / dt)
+                throughput = throughput.map { $0 * 0.5 + sample * 0.5 } ?? sample
+                sessionBytes += delta
+                unsavedBytes += delta
+            } else if isBuffering, let current = throughput {
+                // Esperando datos sin recibir nada: la conexión real es más lenta de lo que mostraba.
+                throughput = current * 0.6
+            }
+        } else {
+            sampledItem = id
+        }
+        sampledBytes = total
+        sampledAt = now
+        if throughput == nil, observed > 0 {
+            throughput = observed
+        }
+        let height = Int(item.presentationSize.height.rounded())
+        if height > 0, height != videoHeight { videoHeight = height }
+        if now.timeIntervalSince(lastUsageFlush) > 15 { flushUsage() }
+    }
+
+    private func flushUsage() {
+        lastUsageFlush = Date()
+        if unsavedBytes > 0 {
+            DataUsage.add(bytes: unsavedBytes, cellular: !network.isWiFi)
+            unsavedBytes = 0
+        }
+        if let throughput, started { BandwidthMemory.record(throughput, wifi: network.isWiFi) }
+    }
+
     // MARK: Cierre
 
     func close() {
         guard !closed else { return }
+        sampleNetwork()
+        flushUsage()
+        meterTask?.cancel()
+        meterTask = nil
         if started { report("stop") }
         closed = true
         stopHeartbeat()

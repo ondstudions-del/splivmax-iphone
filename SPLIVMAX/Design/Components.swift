@@ -571,8 +571,8 @@ struct AvatarView: View {
 
     var body: some View {
         ZStack {
-            Theme.gradient
             if url == nil {
+                Theme.gradient
                 Text(String(name.prefix(1)).uppercased())
                     .font(.system(size: size * 0.42, weight: .bold))
                     .foregroundColor(.white)

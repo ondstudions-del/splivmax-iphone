@@ -24,6 +24,7 @@ struct PlayerView: View {
     @State private var originalBrightness: CGFloat?
     @State private var reporting = false
     @AppStorage(Prefs.subtitleSizeKey) private var subtitleSize = 1
+    @AppStorage(Prefs.speedMeterKey) private var speedMeterPinned = false
 
     init(request: PlayRequest) {
         self.request = request
@@ -50,14 +51,26 @@ struct PlayerView: View {
                 captionView
 
                 if controller.isBuffering && !isFailed && controller.phase != .ended {
-                    ProgressView()
-                        .tint(.white)
-                        .scaleEffect(1.6)
-                        .allowsHitTesting(false)
+                    VStack(spacing: 18) {
+                        ProgressView()
+                            .tint(.white)
+                            .scaleEffect(1.6)
+                        if let bps = controller.throughput {
+                            SpeedBadge(bitsPerSecond: bps, height: nil)
+                        }
+                    }
+                    .allowsHitTesting(false)
                 }
 
                 if controlsVisible && !isFailed && controller.phase != .ended {
                     controls
+                        .transition(.opacity)
+                } else if speedMeterPinned, !isFailed, let bps = controller.throughput {
+                    SpeedBadge(bitsPerSecond: bps, height: controller.videoHeight)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .allowsHitTesting(false)
                         .transition(.opacity)
                 }
 
@@ -270,13 +283,18 @@ struct PlayerView: View {
 
             Spacer()
 
-            if controller.lowData {
-                Label("Ahorro de datos", systemImage: "leaf.fill")
-                    .font(.system(size: 11.5, weight: .bold))
+            if controller.lowData || controller.qualityMode == .saver {
+                Label(controller.sessionBytes > 0 ? DataUsage.format(Double(controller.sessionBytes)) : "Ahorro", systemImage: "leaf.fill")
+                    .font(.system(size: 11.5, weight: .bold).monospacedDigit())
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Theme.ok.opacity(0.25), in: Capsule())
                     .foregroundColor(Theme.ok)
+                    .accessibilityLabel(Text("Ahorro de datos activo"))
+            }
+
+            if let bps = controller.throughput {
+                SpeedBadge(bitsPerSecond: bps, height: controller.videoHeight)
             }
 
             RoutePickerButton()
@@ -456,6 +474,10 @@ struct PlayerView: View {
             }
             .pickerStyle(.menu)
 
+            Toggle(isOn: $speedMeterPinned) {
+                Label("Medidor siempre visible", systemImage: "gauge.with.dots.needle.33percent")
+            }
+
             Divider()
 
             Button { reporting = true } label: {
@@ -558,6 +580,39 @@ struct PlayerView: View {
 }
 
 // MARK: - Piezas del reproductor
+
+/// Medidor de la velocidad de descarga: rojo por debajo de 1 Mbps, amarillo hasta 2,5 Mbps, verde por encima.
+struct SpeedBadge: View {
+    let bitsPerSecond: Double
+    let height: Int?
+
+    private var color: Color {
+        switch Speed.level(bitsPerSecond) {
+        case .low: return Theme.bad
+        case .medium: return Theme.warn
+        case .high: return Theme.ok
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(Speed.text(bitsPerSecond))
+                .foregroundColor(color)
+            if let height, height > 0 {
+                Text("· \(height)p").foregroundColor(.white.opacity(0.8))
+            }
+        }
+        .font(.system(size: 12, weight: .bold).monospacedDigit())
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(.black.opacity(0.45), in: Capsule())
+        .overlay(Capsule().stroke(color.opacity(0.45), lineWidth: 1))
+        .animation(.easeOut(duration: 0.3), value: Speed.text(bitsPerSecond))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Velocidad de la conexión: \(Speed.text(bitsPerSecond))"))
+    }
+}
 
 private struct SeekFlash: Equatable {
     let forward: Bool

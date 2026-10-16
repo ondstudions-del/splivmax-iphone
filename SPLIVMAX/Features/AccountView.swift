@@ -640,31 +640,60 @@ struct DevicesView: View {
 // MARK: - Ajustes
 
 struct SettingsView: View {
-    @AppStorage(Prefs.dataSaverKey) private var dataSaver = false
+    @AppStorage(Prefs.dataSaverModeKey) private var dataSaverMode = DataSaverMode.off.rawValue
     @AppStorage(Prefs.subtitleSizeKey) private var subtitleSize = 1
+    @AppStorage(Prefs.speedMeterKey) private var speedMeter = false
     @EnvironmentObject private var network: NetworkMonitor
     @EnvironmentObject private var session: SessionStore
     @State private var cleared = false
+    @State private var cellularUsage = DataUsage.cellularBytes
+    @State private var wifiUsage = DataUsage.wifiBytes
 
     var body: some View {
         Form {
             Section {
-                Toggle("Ahorro de datos", isOn: $dataSaver)
-                    .tint(Theme.accent)
+                Picker("Ahorro de datos", selection: $dataSaverMode) {
+                    ForEach(DataSaverMode.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                HStack {
+                    Text("Ahora mismo")
+                    Spacer()
+                    Label(network.prefersLowData ? "Ahorro activo" : "Calidad automática",
+                          systemImage: network.prefersLowData ? "leaf.fill" : "sparkles.tv")
+                        .foregroundColor(network.prefersLowData ? Theme.ok : Theme.text2)
+                        .font(.system(size: 14, weight: .semibold))
+                }
+            } header: { Text("Ahorro de datos") } footer: {
+                Text(dataSaverFooter)
+            }
+
+            Section {
+                LabeledContent("Con datos móviles", value: DataUsage.format(cellularUsage))
+                LabeledContent("Con Wi-Fi", value: DataUsage.format(wifiUsage))
+                Button("Reiniciar contador") {
+                    DataUsage.reset()
+                    cellularUsage = 0
+                    wifiUsage = 0
+                }
+            } header: { Text("Vídeo visto este mes") } footer: {
+                Text("Cuenta solo el vídeo reproducido en SPLIVMAX desde este iPhone.")
+            }
+
+            Section {
                 Picker("Tamaño de subtítulos", selection: $subtitleSize) {
                     Text("Pequeños").tag(0)
                     Text("Normales").tag(1)
                     Text("Grandes").tag(2)
                 }
+                Toggle("Medidor de velocidad siempre visible", isOn: $speedMeter)
+                    .tint(Theme.accent)
                 if session.isLoggedIn {
                     NavigationLink(value: Route.manageProfiles) {
                         Text("Reproducción automática y control parental")
                     }
                 }
             } header: { Text("Reproducción") } footer: {
-                Text(network.isConstrained
-                     ? "El modo Datos reducidos de iOS está activo: SPLIVMAX usa la calidad más ligera automáticamente."
-                     : "Con el ahorro de datos el vídeo empieza antes y gasta menos datos, con una calidad menor.")
+                Text("El medidor muestra la velocidad de tu conexión mientras ves algo: rojo por debajo de 1 Mbps, amarillo hasta 2,5 Mbps y verde por encima.")
             }
 
             Section {
@@ -689,6 +718,18 @@ struct SettingsView: View {
         .screenBackground()
         .navigationTitle("Ajustes")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            cellularUsage = DataUsage.cellularBytes
+            wifiUsage = DataUsage.wifiBytes
+        }
+    }
+
+    private var dataSaverFooter: String {
+        if network.isConstrained {
+            return "El modo Datos reducidos de iOS está activo: SPLIVMAX usa la calidad más ligera automáticamente."
+        }
+        return "Con el ahorro de datos el vídeo se limita a 480p (unos 0,4 GB por hora en lugar de hasta 3 GB en HD), "
+            + "se descarga menos por adelantado y las imágenes se cargan más ligeras."
     }
 }
 

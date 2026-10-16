@@ -160,7 +160,7 @@ struct ProfilePickerView: View {
                     if let error { InlineError(message: error).padding(.horizontal, 24) }
 
                     HStack(spacing: 18) {
-                        if session.profile != nil {
+                        if session.profile != nil && !session.profileChoiceRequired {
                             Button("Cancelar") { session.cancelProfileChoice() }
                         }
                         Button("Cerrar sesión") { Task { await session.logout() } }
