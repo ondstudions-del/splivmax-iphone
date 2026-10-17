@@ -233,15 +233,32 @@ struct TitleCard: Codable, Hashable, Identifiable {
     }
 }
 
-struct WatchProgress: Codable, Hashable {
+struct WatchProgress: Decodable, Hashable {
     let position: Int
     let duration: Int
     let percent: Int
     let completed: Bool
     let updatedAt: String?
+
+    enum CodingKeys: String, CodingKey { case position, duration, percent, completed, updatedAt }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        position = c.flexInt(.position) ?? 0
+        duration = c.flexInt(.duration) ?? 0
+        if let p = c.flexInt(.percent) {
+            percent = min(100, max(0, p))
+        } else if duration > 0 {
+            percent = min(100, max(0, Int((Double(position) / Double(duration)) * 100)))
+        } else {
+            percent = 0
+        }
+        completed = (try? c.decode(Bool.self, forKey: .completed)) ?? (percent >= 95)
+        updatedAt = try? c.decodeIfPresent(String.self, forKey: .updatedAt)
+    }
 }
 
-struct Episode: Codable, Hashable, Identifiable {
+struct Episode: Decodable, Hashable, Identifiable {
     let id: String
     let season: Int?
     let number: Int?
@@ -254,6 +271,28 @@ struct Episode: Codable, Hashable, Identifiable {
     let progress: WatchProgress?
 
     var code: String { "T\(season ?? 0):E\(number ?? 0)" }
+
+    enum CodingKeys: String, CodingKey {
+        case id, season, number, title, synopsis, durationMin, thumbnail, playable, releaseAt, progress
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        season = c.flexInt(.season)
+        number = c.flexInt(.number)
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        synopsis = (try? c.decode(String.self, forKey: .synopsis)) ?? ""
+        durationMin = c.flexInt(.durationMin)
+        if let s = try? c.decodeIfPresent(String.self, forKey: .thumbnail) {
+            thumbnail = URL(string: s)
+        } else {
+            thumbnail = nil
+        }
+        playable = (try? c.decode(Bool.self, forKey: .playable)) ?? true
+        releaseAt = try? c.decodeIfPresent(String.self, forKey: .releaseAt)
+        progress = try? c.decodeIfPresent(WatchProgress.self, forKey: .progress)
+    }
 }
 
 struct Season: Codable, Hashable, Identifiable {
@@ -351,6 +390,25 @@ struct ContinueItem: Decodable, Identifiable, Hashable {
     let progress: WatchProgress?
     let upNext: Bool
     var id: String { title.id }
+
+    enum CodingKeys: String, CodingKey { case title, episode, progress, upNext }
+
+    init(from decoder: Decoder) throws {
+        // Formato anidado { title, episode, progress, up_next }
+        if let c = try? decoder.container(keyedBy: CodingKeys.self),
+           let nested = try? c.decode(TitleCard.self, forKey: .title) {
+            title = nested
+            episode = try? c.decodeIfPresent(Episode.self, forKey: .episode)
+            progress = try? c.decodeIfPresent(WatchProgress.self, forKey: .progress)
+            upNext = (try? c.decode(Bool.self, forKey: .upNext)) ?? false
+            return
+        }
+        // Formato plano (card) — compatibilidad
+        title = try TitleCard(from: decoder)
+        episode = nil
+        progress = nil
+        upNext = false
+    }
 }
 
 struct HomeData: Decodable {
@@ -361,6 +419,13 @@ struct HomeData: Decodable {
     enum CodingKeys: String, CodingKey {
         case hero, sections
         case continueItems = "continue"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hero = try? c.decodeIfPresent(HeroItem.self, forKey: .hero)
+        continueItems = (try? c.decode([ContinueItem].self, forKey: .continueItems)) ?? []
+        sections = (try? c.decode([HomeSection].self, forKey: .sections)) ?? []
     }
 }
 
