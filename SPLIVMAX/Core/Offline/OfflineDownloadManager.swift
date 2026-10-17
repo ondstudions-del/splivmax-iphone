@@ -10,6 +10,33 @@ enum OfflineDownloadState: String, Codable, Hashable {
     case failed
 }
 
+/// Rutas de almacenamiento offline (no aisladas a MainActor; usables desde structs y delegates).
+enum OfflinePaths {
+    static var rootDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("SPLIVMAX/Offline", isDirectory: true)
+    }
+
+    static var mediaDirectory: URL {
+        rootDirectory.appendingPathComponent("Media", isDirectory: true)
+    }
+
+    static var indexURL: URL {
+        rootDirectory.appendingPathComponent("index.json")
+    }
+
+    static func ensureDirectories() {
+        let fm = FileManager.default
+        for dir in [rootDirectory, mediaDirectory] {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var mutable = dir
+            try? mutable.setResourceValues(values)
+        }
+    }
+}
+
 /// Metadatos de un título o episodio descargado. El vídeo vive en Application Support (no en Fotos).
 struct OfflineItem: Identifiable, Codable, Hashable {
     let id: String
@@ -36,7 +63,7 @@ struct OfflineItem: Identifiable, Codable, Hashable {
 
     var localFileURL: URL? {
         guard let name = localFileName else { return nil }
-        let url = OfflineDownloadManager.mediaDirectory.appendingPathComponent(name)
+        let url = OfflinePaths.mediaDirectory.appendingPathComponent(name)
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 }
@@ -90,22 +117,13 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    static var rootDirectory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return base.appendingPathComponent("SPLIVMAX/Offline", isDirectory: true)
-    }
-
-    static var mediaDirectory: URL {
-        rootDirectory.appendingPathComponent("Media", isDirectory: true)
-    }
-
-    private static var indexURL: URL {
-        rootDirectory.appendingPathComponent("index.json")
-    }
+    nonisolated static var rootDirectory: URL { OfflinePaths.rootDirectory }
+    nonisolated static var mediaDirectory: URL { OfflinePaths.mediaDirectory }
+    private nonisolated static var indexURL: URL { OfflinePaths.indexURL }
 
     private override init() {
         super.init()
-        Self.ensureDirectories()
+        OfflinePaths.ensureDirectories()
         loadIndex()
         let config = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         config.isDiscretionary = false
@@ -220,7 +238,7 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
     func remove(_ id: String) {
         if let item = items.first(where: { $0.id == id }) {
             if let name = item.localFileName {
-                try? FileManager.default.removeItem(at: Self.mediaDirectory.appendingPathComponent(name))
+                try? FileManager.default.removeItem(at: OfflinePaths.mediaDirectory.appendingPathComponent(name))
             }
             if let tid = item.taskIdentifier {
                 session.getAllTasks { tasks in
@@ -239,19 +257,8 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
 
     // MARK: Persistencia
 
-    private static func ensureDirectories() {
-        let fm = FileManager.default
-        for dir in [rootDirectory, mediaDirectory] {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            var mutable = dir
-            try? mutable.setResourceValues(values)
-        }
-    }
-
     private func loadIndex() {
-        guard let data = try? Data(contentsOf: Self.indexURL),
+        guard let data = try? Data(contentsOf: OfflinePaths.indexURL),
               let decoded = try? decoder.decode([OfflineItem].self, from: data) else {
             items = []
             return
@@ -270,9 +277,9 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
     }
 
     private func persist() {
-        Self.ensureDirectories()
+        OfflinePaths.ensureDirectories()
         guard let data = try? encoder.encode(items) else { return }
-        try? data.write(to: Self.indexURL, options: .atomic)
+        try? data.write(to: OfflinePaths.indexURL, options: .atomic)
     }
 
     private func upsert(_ item: OfflineItem) {
@@ -345,10 +352,10 @@ extension OfflineDownloadManager: URLSessionDownloadDelegate {
                 self.upsert(item)
                 return
             }
-            Self.ensureDirectories()
+            OfflinePaths.ensureDirectories()
             let ext = item.isMatroska ? "mkv" : "mp4"
             let name = "\(id).\(ext)"
-            let dest = Self.mediaDirectory.appendingPathComponent(name)
+            let dest = OfflinePaths.mediaDirectory.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: dest)
             do {
                 try FileManager.default.moveItem(at: staging, to: dest)
