@@ -233,7 +233,7 @@ struct TitleCard: Codable, Hashable, Identifiable {
     }
 }
 
-struct WatchProgress: Decodable, Hashable {
+struct WatchProgress: Codable, Hashable {
     let position: Int
     let duration: Int
     let percent: Int
@@ -241,6 +241,14 @@ struct WatchProgress: Decodable, Hashable {
     let updatedAt: String?
 
     enum CodingKeys: String, CodingKey { case position, duration, percent, completed, updatedAt }
+
+    init(position: Int = 0, duration: Int = 0, percent: Int = 0, completed: Bool = false, updatedAt: String? = nil) {
+        self.position = position
+        self.duration = duration
+        self.percent = percent
+        self.completed = completed
+        self.updatedAt = updatedAt
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -256,9 +264,18 @@ struct WatchProgress: Decodable, Hashable {
         completed = (try? c.decode(Bool.self, forKey: .completed)) ?? (percent >= 95)
         updatedAt = try? c.decodeIfPresent(String.self, forKey: .updatedAt)
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(position, forKey: .position)
+        try c.encode(duration, forKey: .duration)
+        try c.encode(percent, forKey: .percent)
+        try c.encode(completed, forKey: .completed)
+        try c.encodeIfPresent(updatedAt, forKey: .updatedAt)
+    }
 }
 
-struct Episode: Decodable, Hashable, Identifiable {
+struct Episode: Codable, Hashable, Identifiable {
     let id: String
     let season: Int?
     let number: Int?
@@ -292,6 +309,20 @@ struct Episode: Decodable, Hashable, Identifiable {
         playable = (try? c.decode(Bool.self, forKey: .playable)) ?? true
         releaseAt = try? c.decodeIfPresent(String.self, forKey: .releaseAt)
         progress = try? c.decodeIfPresent(WatchProgress.self, forKey: .progress)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(season, forKey: .season)
+        try c.encodeIfPresent(number, forKey: .number)
+        try c.encode(title, forKey: .title)
+        try c.encode(synopsis, forKey: .synopsis)
+        try c.encodeIfPresent(durationMin, forKey: .durationMin)
+        try c.encodeIfPresent(thumbnail, forKey: .thumbnail)
+        try c.encode(playable, forKey: .playable)
+        try c.encodeIfPresent(releaseAt, forKey: .releaseAt)
+        try c.encodeIfPresent(progress, forKey: .progress)
     }
 }
 
