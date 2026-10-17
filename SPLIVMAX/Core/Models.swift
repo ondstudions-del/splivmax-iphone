@@ -976,6 +976,20 @@ struct PlaybackTitle: Decodable, Hashable {
         self.title = title
         self.backdrop = backdrop
     }
+
+    enum CodingKeys: String, CodingKey { case id, type, title, backdrop }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        type = (try? c.decode(String.self, forKey: .type)) ?? "movie"
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        if let s = try? c.decodeIfPresent(String.self, forKey: .backdrop) {
+            backdrop = URL(string: s)
+        } else {
+            backdrop = try? c.decodeIfPresent(URL.self, forKey: .backdrop)
+        }
+    }
 }
 
 struct PlaybackSettings: Decodable, Hashable {
@@ -987,6 +1001,15 @@ struct PlaybackSettings: Decodable, Hashable {
         self.autoplayNext = autoplayNext
         self.countdown = countdown
         self.interval = interval
+    }
+
+    enum CodingKeys: String, CodingKey { case autoplayNext, countdown, interval }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        autoplayNext = (try? c.decode(Bool.self, forKey: .autoplayNext)) ?? true
+        countdown = c.flexInt(.countdown) ?? 10
+        interval = c.flexInt(.interval) ?? 15
     }
 }
 
@@ -1027,6 +1050,25 @@ struct PlaybackData: Decodable {
     }
 
     var isOffline: Bool { streamId == "offline" }
+
+    enum CodingKeys: String, CodingKey {
+        case streamId, title, episode, next, sources, subtitles, resume, preferredSubtitle, settings, expiresIn
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        streamId = (try? c.decode(String.self, forKey: .streamId)) ?? ""
+        title = try c.decode(PlaybackTitle.self, forKey: .title)
+        episode = try? c.decodeIfPresent(PlaybackEpisode.self, forKey: .episode)
+        next = try? c.decodeIfPresent(PlaybackNext.self, forKey: .next)
+        sources = (try? c.decode([PlaybackSource].self, forKey: .sources)) ?? []
+        subtitles = (try? c.decode([PlaybackSubtitle].self, forKey: .subtitles)) ?? []
+        resume = c.flexInt(.resume) ?? 0
+        preferredSubtitle = try? c.decodeIfPresent(String.self, forKey: .preferredSubtitle)
+        settings = (try? c.decode(PlaybackSettings.self, forKey: .settings))
+            ?? PlaybackSettings(autoplayNext: true, countdown: 10, interval: 15)
+        expiresIn = c.flexInt(.expiresIn) ?? 0
+    }
 }
 
 struct HeartbeatResponse: Decodable {
