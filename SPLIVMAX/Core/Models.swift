@@ -357,6 +357,7 @@ struct TitleDetail: Decodable {
     let originalTitle: String
     let cast: [CastMember]
     let directors: [String]
+    let tags: [String]
     let languages: [LanguageItem]
     let subtitleLanguages: [LanguageItem]
     let rightsHolder: String
@@ -369,8 +370,11 @@ struct TitleDetail: Decodable {
     let resume: ResumeTarget?
     let similar: [TitleCard]
 
+    /// Autores / dirección (misma lista).
+    var authors: [String] { directors }
+
     enum CodingKeys: String, CodingKey {
-        case synopsisFull, originalTitle, cast, directors, languages, subtitleLanguages, rightsHolder
+        case synopsisFull, originalTitle, cast, directors, authors, tags, languages, subtitleLanguages, rightsHolder
         case commentsEnabled, commentsCount, favorite, canWatch, progress, seasonList, resume, similar
     }
 
@@ -380,11 +384,14 @@ struct TitleDetail: Decodable {
         synopsisFull = (try? c.decode(String.self, forKey: .synopsisFull)) ?? ""
         originalTitle = (try? c.decode(String.self, forKey: .originalTitle)) ?? ""
         cast = (try? c.decode([CastMember].self, forKey: .cast)) ?? []
-        directors = c.lossyStrings(.directors)
+        let fromDirectors = c.lossyStrings(.directors)
+        let fromAuthors = c.lossyStrings(.authors)
+        directors = fromDirectors.isEmpty ? fromAuthors : fromDirectors
+        tags = c.lossyStrings(.tags)
         languages = (try? c.decode([LanguageItem].self, forKey: .languages)) ?? []
         subtitleLanguages = (try? c.decode([LanguageItem].self, forKey: .subtitleLanguages)) ?? []
         rightsHolder = (try? c.decode(String.self, forKey: .rightsHolder)) ?? ""
-        commentsEnabled = (try? c.decode(Bool.self, forKey: .commentsEnabled)) ?? false
+        commentsEnabled = (try? c.decode(Bool.self, forKey: .commentsEnabled)) ?? true
         commentsCount = (try? c.decode(Int.self, forKey: .commentsCount)) ?? 0
         favorite = (try? c.decode(Bool.self, forKey: .favorite)) ?? false
         canWatch = (try? c.decode(Bool.self, forKey: .canWatch)) ?? false
@@ -514,6 +521,25 @@ struct Comment: Decodable, Identifiable {
     let createdAt: String?
     let mine: Bool
     let canDelete: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, author, avatarUrl, body, createdAt, mine, canDelete
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        author = (try? c.decode(String.self, forKey: .author)) ?? "Usuario"
+        if let s = try? c.decodeIfPresent(String.self, forKey: .avatarUrl) {
+            avatarUrl = URL(string: s)
+        } else {
+            avatarUrl = nil
+        }
+        body = (try? c.decode(String.self, forKey: .body)) ?? ""
+        createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
+        mine = (try? c.decode(Bool.self, forKey: .mine)) ?? false
+        canDelete = (try? c.decode(Bool.self, forKey: .canDelete)) ?? mine
+    }
 }
 
 // MARK: - Cuenta y perfiles
@@ -869,6 +895,14 @@ struct PlaybackSource: Decodable, Hashable {
         return url.absoluteString.lowercased().contains(".mkv")
     }
 
+    init(url: URL, type: String, hls: Bool, quality: Int, label: String) {
+        self.url = url
+        self.type = type
+        self.hls = hls
+        self.quality = quality
+        self.label = label
+    }
+
     enum CodingKeys: String, CodingKey { case url, src, type, hls, quality, label }
 
     init(from decoder: Decoder) throws {
@@ -903,6 +937,14 @@ struct PlaybackEpisode: Decodable, Hashable {
     let season: Int?
     let label: String
 
+    init(id: String, title: String, number: Int?, season: Int?, label: String) {
+        self.id = id
+        self.title = title
+        self.number = number
+        self.season = season
+        self.label = label
+    }
+
     enum CodingKeys: String, CodingKey { case id, title, number, season, label }
 
     init(from decoder: Decoder) throws {
@@ -927,12 +969,25 @@ struct PlaybackTitle: Decodable, Hashable {
     let type: String
     let title: String
     let backdrop: URL?
+
+    init(id: String, type: String, title: String, backdrop: URL?) {
+        self.id = id
+        self.type = type
+        self.title = title
+        self.backdrop = backdrop
+    }
 }
 
 struct PlaybackSettings: Decodable, Hashable {
     let autoplayNext: Bool
     let countdown: Int
     let interval: Int
+
+    init(autoplayNext: Bool, countdown: Int, interval: Int) {
+        self.autoplayNext = autoplayNext
+        self.countdown = countdown
+        self.interval = interval
+    }
 }
 
 struct PlaybackData: Decodable {
@@ -946,6 +1001,32 @@ struct PlaybackData: Decodable {
     let preferredSubtitle: String?
     let settings: PlaybackSettings
     let expiresIn: Int
+
+    init(
+        streamId: String,
+        title: PlaybackTitle,
+        episode: PlaybackEpisode?,
+        next: PlaybackNext?,
+        sources: [PlaybackSource],
+        subtitles: [PlaybackSubtitle],
+        resume: Int,
+        preferredSubtitle: String?,
+        settings: PlaybackSettings,
+        expiresIn: Int
+    ) {
+        self.streamId = streamId
+        self.title = title
+        self.episode = episode
+        self.next = next
+        self.sources = sources
+        self.subtitles = subtitles
+        self.resume = resume
+        self.preferredSubtitle = preferredSubtitle
+        self.settings = settings
+        self.expiresIn = expiresIn
+    }
+
+    var isOffline: Bool { streamId == "offline" }
 }
 
 struct HeartbeatResponse: Decodable {

@@ -7,6 +7,7 @@ enum Route: Hashable {
     case genre(slug: String, name: String, type: String?)
     case myList
     case history
+    case offline
     case notifications
     case plans
     case settings
@@ -27,6 +28,7 @@ struct RouteDestination: View {
         case .genre(let slug, let name, let type): GenreCatalogView(slug: slug, name: name, type: type)
         case .myList: MyListView()
         case .history: HistoryView()
+        case .offline: OfflineLibraryView()
         case .notifications: NotificationsView()
         case .plans: PlansView()
         case .settings: SettingsView()

@@ -107,10 +107,35 @@ struct AccountView: View {
     // MARK: Secciones
 
     private var quickLinks: some View {
-        HStack(spacing: 10) {
-            QuickTile(route: .myList, icon: "heart.fill", title: "Mi lista")
-            QuickTile(route: .history, icon: "clock.arrow.circlepath", title: "Historial")
-            QuickTile(route: .notifications, icon: "bell.fill", title: "Avisos", badge: session.unread)
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                QuickTile(route: .myList, icon: "heart.fill", title: "Mi lista")
+                QuickTile(route: .history, icon: "clock.arrow.circlepath", title: "Historial")
+                QuickTile(route: .notifications, icon: "bell.fill", title: "Avisos", badge: session.unread)
+            }
+            NavigationLink(value: Route.offline) {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Theme.gradient)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Ver sin conexión")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(Theme.text)
+                        Text("Descargas Premium · solo en la app")
+                            .font(.system(size: 12))
+                            .foregroundColor(Theme.muted)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(Theme.muted)
+                }
+                .padding(14)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.line, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
         }
     }
 

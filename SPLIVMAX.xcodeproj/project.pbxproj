@@ -15,6 +15,8 @@
 		5A1B0000000000000000B023 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A023 /* Models.swift */; };
 		5A1B0000000000000000B024 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A024 /* NetworkMonitor.swift */; };
 		5A1B0000000000000000B025 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A025 /* SessionStore.swift */; };
+		5A1B0000000000000000B026 /* OfflineDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A026 /* OfflineDownloadManager.swift */; };
+		5A1B0000000000000000B04B /* OfflineViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A04B /* OfflineViews.swift */; };
 		5A1B0000000000000000B030 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A030 /* Components.swift */; };
 		5A1B0000000000000000B031 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A031 /* Theme.swift */; };
 		5A1B0000000000000000B040 /* AccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A040 /* AccountView.swift */; };
@@ -45,6 +47,8 @@
 		5A1B0000000000000000A023 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A024 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A025 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
+		5A1B0000000000000000A026 /* OfflineDownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineDownloadManager.swift; sourceTree = "<group>"; };
+		5A1B0000000000000000A04B /* OfflineViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineViews.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A030 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A031 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A040 /* AccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountView.swift; sourceTree = "<group>"; };
@@ -112,6 +116,7 @@
 		5A1B0000000000000000C011 /* Core */ = {
 			isa = PBXGroup;
 			children = (
+				5A1B0000000000000000C015 /* Offline */,
 				5A1B0000000000000000A020 /* APIClient.swift */,
 				5A1B0000000000000000A021 /* ImageLoader.swift */,
 				5A1B0000000000000000A022 /* KeychainStore.swift */,
@@ -120,6 +125,14 @@
 				5A1B0000000000000000A025 /* SessionStore.swift */,
 			);
 			path = Core;
+			sourceTree = "<group>";
+		};
+		5A1B0000000000000000C015 /* Offline */ = {
+			isa = PBXGroup;
+			children = (
+				5A1B0000000000000000A026 /* OfflineDownloadManager.swift */,
+			);
+			path = Offline;
 			sourceTree = "<group>";
 		};
 		5A1B0000000000000000C012 /* Design */ = {
@@ -141,6 +154,7 @@
 				5A1B0000000000000000A043 /* CatalogView.swift */,
 				5A1B0000000000000000A044 /* HomeView.swift */,
 				5A1B0000000000000000A045 /* LibraryViews.swift */,
+				5A1B0000000000000000A04B /* OfflineViews.swift */,
 				5A1B0000000000000000A046 /* ProfileViews.swift */,
 				5A1B0000000000000000A047 /* RootView.swift */,
 				5A1B0000000000000000A048 /* SearchView.swift */,
@@ -253,6 +267,7 @@
 				5A1B0000000000000000B023 /* Models.swift in Sources */,
 				5A1B0000000000000000B024 /* NetworkMonitor.swift in Sources */,
 				5A1B0000000000000000B025 /* SessionStore.swift in Sources */,
+				5A1B0000000000000000B026 /* OfflineDownloadManager.swift in Sources */,
 				5A1B0000000000000000B030 /* Components.swift in Sources */,
 				5A1B0000000000000000B031 /* Theme.swift in Sources */,
 				5A1B0000000000000000B040 /* AccountView.swift in Sources */,
@@ -261,6 +276,7 @@
 				5A1B0000000000000000B043 /* CatalogView.swift in Sources */,
 				5A1B0000000000000000B044 /* HomeView.swift in Sources */,
 				5A1B0000000000000000B045 /* LibraryViews.swift in Sources */,
+				5A1B0000000000000000B04B /* OfflineViews.swift in Sources */,
 				5A1B0000000000000000B046 /* ProfileViews.swift in Sources */,
 				5A1B0000000000000000B047 /* RootView.swift in Sources */,
 				5A1B0000000000000000B048 /* SearchView.swift in Sources */,

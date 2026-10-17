@@ -9,6 +9,9 @@ struct PlayRequest: Identifiable, Equatable {
     let titleId: String
     var episodeId: String?
     let title: String
+    /// Archivo local (Ver sin conexión). No se usa la API de streaming.
+    var localFileURL: URL? = nil
+    var isMatroska: Bool = false
 }
 
 /// Abre el reproductor a pantalla completa desde cualquier pantalla.
@@ -21,8 +24,15 @@ final class PlayerCoordinator: ObservableObject {
     /// Aumenta al cerrar el reproductor: las fichas recargan el progreso.
     @Published private(set) var closedCount = 0
 
-    func play(titleId: String, episodeId: String? = nil, title: String) {
-        request = PlayRequest(titleId: titleId, episodeId: episodeId, title: title)
+    func play(titleId: String, episodeId: String? = nil, title: String,
+              localFileURL: URL? = nil, isMatroska: Bool = false) {
+        request = PlayRequest(
+            titleId: titleId,
+            episodeId: episodeId,
+            title: title,
+            localFileURL: localFileURL,
+            isMatroska: isMatroska
+        )
     }
 
     func didClose() {
@@ -176,6 +186,10 @@ final class PlayerController: NSObject, ObservableObject {
         keepScreenAwake(true)
         lowData = network.prefersLowData
         activateAudio()
+        if let local = request.localFileURL {
+            startOffline(fileURL: local)
+            return
+        }
         var query: [String: String] = [:]
         if let ep = request.episodeId { query["episode"] = ep }
         if lowData { query["lite"] = "1" }
@@ -222,6 +236,40 @@ final class PlayerController: NSObject, ObservableObject {
     func retry() {
         startAttempts = 0
         Task { await start() }
+    }
+
+    /// Reproduce un archivo descargado (sandbox de la app; no Galería).
+    private func startOffline(fileURL: URL) {
+        startAttempts = 0
+        let source = PlaybackSource(
+            url: fileURL,
+            type: request.isMatroska ? "video/x-matroska" : "video/mp4",
+            hls: false,
+            quality: 1080,
+            label: "Sin conexión"
+        )
+        let episode: PlaybackEpisode? = request.episodeId.map {
+            PlaybackEpisode(id: $0, title: request.title, number: nil, season: nil, label: request.title)
+        }
+        let d = PlaybackData(
+            streamId: "offline",
+            title: PlaybackTitle(id: request.titleId, type: episode == nil ? "movie" : "series", title: request.title, backdrop: nil),
+            episode: episode,
+            next: nil,
+            sources: [source],
+            subtitles: [],
+            resume: 0,
+            preferredSubtitle: nil,
+            settings: PlaybackSettings(autoplayNext: false, countdown: 0, interval: 60),
+            expiresIn: 0
+        )
+        data = d
+        countdownCancelled = false
+        nextCountdown = nil
+        started = false
+        candidates = [source]
+        candidateIndex = 0
+        load(source, at: 0)
     }
 
     /// El vídeo arranca con sonido aunque el iPhone esté en modo silencio.
@@ -1107,7 +1155,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func report(_ event: String) {
-        guard let d = data else { return }
+        guard let d = data, !d.isOffline else { return }
         let body: [String: Any] = [
             "title_id": d.title.id,
             "episode_id": d.episode?.id ?? "",
@@ -1129,7 +1177,7 @@ final class PlayerController: NSObject, ObservableObject {
 
     /// La sesión de reproducción caducó (pausa larga): se pide una nueva sin cortar el vídeo.
     private func renewStream() async {
-        guard !closed else { return }
+        guard !closed, data?.isOffline != true else { return }
         var query: [String: String] = [:]
         if let ep = request.episodeId { query["episode"] = ep }
         do {

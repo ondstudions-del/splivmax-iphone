@@ -24,7 +24,9 @@ final class TitleDetailModel: ObservableObject {
                 let resumeSeason = d.resume.flatMap { r in d.seasonList.first { $0.episodes.contains { $0.id == r.episodeId } } }
                 seasonId = resumeSeason?.id ?? d.seasonList.first?.id
             }
-            if d.commentsEnabled && comments.isEmpty { await loadComments(reset: true) }
+            if (d.commentsEnabled || !d.card.isSeries) && comments.isEmpty {
+                await loadComments(reset: true)
+            }
         } catch is CancellationError {
         } catch {
             let e = APIError.from(error)
@@ -72,6 +74,7 @@ struct TitleDetailView: View {
     @StateObject private var model: TitleDetailModel
     @State private var showFullSynopsis = false
     @State private var reporting = false
+    @State private var scrollToComments = false
 
     init(id: String, preview: TitleCard?) {
         self.id = id
@@ -81,53 +84,65 @@ struct TitleDetailView: View {
 
     private var card: TitleCard? { model.detail?.card ?? preview }
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                backdrop
-                if let card {
-                    VStack(alignment: .leading, spacing: 18) {
-                        header(card)
-                        if let detail = model.detail {
-                            actions(card, detail)
-                            accessNotice(card, detail)
-                            synopsis(detail)
-                            if !detail.seasonList.isEmpty { seasons(detail) }
-                            info(detail)
-                        } else if let error = model.error {
-                            ErrorStateView(error: error) { Task { await model.load() } }
-                                .frame(minHeight: 240)
-                        } else {
-                            ProgressView().tint(Theme.accent2).frame(maxWidth: .infinity).padding(.vertical, 30)
-                        }
-                    }
-                    .padding(.horizontal, Theme.gutter + 4)
-                    .padding(.top, -38)
-                }
+    private var shareURL: URL {
+        AppConfig.webURL.appendingPathComponent("titulo/\(id)")
+    }
 
-                if let detail = model.detail {
-                    if !detail.similar.isEmpty {
-                        TitleRow(title: "Títulos similares", items: detail.similar)
-                            .padding(.top, 28)
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    backdrop
+                    if let card {
+                        VStack(alignment: .leading, spacing: 18) {
+                            header(card)
+                            if let detail = model.detail {
+                                actions(card, detail)
+                                accessNotice(card, detail)
+                                synopsis(detail)
+                                if !detail.seasonList.isEmpty { seasons(detail) }
+                                info(card, detail)
+                            } else if let error = model.error {
+                                ErrorStateView(error: error) { Task { await model.load() } }
+                                    .frame(minHeight: 240)
+                            } else {
+                                ProgressView().tint(Theme.accent2).frame(maxWidth: .infinity).padding(.vertical, 30)
+                            }
+                        }
+                        .padding(.horizontal, Theme.gutter + 4)
+                        .padding(.top, -38)
                     }
-                    if detail.commentsEnabled {
-                        CommentsSection(model: model)
-                            .padding(.horizontal, Theme.gutter + 4)
-                            .padding(.top, 28)
+
+                    if let detail = model.detail {
+                        if !detail.similar.isEmpty {
+                            TitleRow(title: "Títulos similares", items: detail.similar)
+                                .padding(.top, 28)
+                        }
+                        if detail.commentsEnabled || !detail.card.isSeries {
+                            CommentsSection(model: model)
+                                .id("comments")
+                                .padding(.horizontal, Theme.gutter + 4)
+                                .padding(.top, 28)
+                        }
+                        if !detail.rightsHolder.isEmpty {
+                            Text("© \(detail.rightsHolder)")
+                                .font(.system(size: 12))
+                                .foregroundColor(Theme.muted)
+                                .padding(.horizontal, Theme.gutter + 4)
+                                .padding(.top, 24)
+                        }
+                    } else if card == nil, let error = model.error {
+                        ErrorStateView(error: error) { Task { await model.load() } }
+                            .frame(minHeight: 400)
                     }
-                    if !detail.rightsHolder.isEmpty {
-                        Text("© \(detail.rightsHolder)")
-                            .font(.system(size: 12))
-                            .foregroundColor(Theme.muted)
-                            .padding(.horizontal, Theme.gutter + 4)
-                            .padding(.top, 24)
-                    }
-                } else if card == nil, let error = model.error {
-                    ErrorStateView(error: error) { Task { await model.load() } }
-                        .frame(minHeight: 400)
                 }
+                .padding(.bottom, 32)
             }
-            .padding(.bottom, 32)
+            .onChange(of: scrollToComments) { go in
+                guard go else { return }
+                withAnimation(.easeInOut) { proxy.scrollTo("comments", anchor: .top) }
+                scrollToComments = false
+            }
         }
         .ignoresSafeArea(edges: .top)
         .screenBackground()
@@ -136,7 +151,7 @@ struct TitleDetailView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 if let card {
-                    ShareLink(item: AppConfig.webURL.appendingPathComponent("titulo/\(card.id)"),
+                    ShareLink(item: shareURL,
                               subject: Text(card.title),
                               message: Text("Mira «\(card.title)» en SPLIVMAX")) {
                         Image(systemName: "square.and.arrow.up")
@@ -239,6 +254,15 @@ struct TitleDetailView: View {
                 }
             }
 
+            if !card.isSeries, !card.isUpcoming, card.playable {
+                OfflineDownloadButton(
+                    titleId: card.id,
+                    displayTitle: card.title,
+                    poster: card.tallImage ?? card.wideImage,
+                    isEpisode: false
+                )
+            }
+
             HStack(spacing: 8) {
                 Button {
                     Task { await session.toggleFavorite(card.id, current: favorite) }
@@ -246,6 +270,27 @@ struct TitleDetailView: View {
                     Label(favorite ? "En Mi lista" : "Mi lista", systemImage: favorite ? "checkmark" : "plus")
                 }
                 .buttonStyle(SecondaryButtonStyle(tint: favorite ? Theme.accent2 : Theme.text))
+
+                ShareLink(
+                    item: shareURL,
+                    subject: Text(card.title),
+                    message: Text("Mira «\(card.title)» en SPLIVMAX")
+                ) {
+                    Label("Compartir", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+
+            HStack(spacing: 8) {
+                if detail.commentsEnabled || !card.isSeries {
+                    Button { scrollToComments = true } label: {
+                        Label(
+                            detail.commentsCount > 0 ? "Comentar (\(detail.commentsCount))" : "Comentar",
+                            systemImage: "bubble.left.and.bubble.right"
+                        )
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                }
 
                 Button {
                     if session.requireLogin() { reporting = true }
@@ -267,7 +312,14 @@ struct TitleDetailView: View {
 
     private func play(_ card: TitleCard, _ detail: TitleDetail) {
         guard session.requireLogin() else { return }
-        player.play(titleId: card.id, episodeId: card.isSeries ? detail.resume?.episodeId : nil, title: card.title)
+        let episodeId = card.isSeries ? detail.resume?.episodeId : nil
+        if let offline = OfflineDownloadManager.shared.item(titleId: card.id, episodeId: episodeId),
+           offline.state == .ready, let url = offline.localFileURL {
+            player.play(titleId: card.id, episodeId: episodeId, title: card.title,
+                        localFileURL: url, isMatroska: offline.isMatroska)
+            return
+        }
+        player.play(titleId: card.id, episodeId: episodeId, title: card.title)
     }
 
     @ViewBuilder
@@ -345,9 +397,21 @@ struct TitleDetailView: View {
             if let season = model.season {
                 LazyVStack(spacing: 4) {
                     ForEach(season.episodes) { ep in
-                        EpisodeRow(episode: ep, current: ep.id == detail.resume?.episodeId) {
+                        EpisodeRow(
+                            episode: ep,
+                            current: ep.id == detail.resume?.episodeId,
+                            titleId: detail.card.id,
+                            seriesTitle: detail.card.title,
+                            poster: detail.card.tallImage ?? detail.card.wideImage
+                        ) {
                             guard session.requireLogin() else { return }
-                            player.play(titleId: detail.card.id, episodeId: ep.id, title: detail.card.title)
+                            if let offline = OfflineDownloadManager.shared.item(titleId: detail.card.id, episodeId: ep.id),
+                               offline.state == .ready, let url = offline.localFileURL {
+                                player.play(titleId: detail.card.id, episodeId: ep.id, title: detail.card.title,
+                                            localFileURL: url, isMatroska: offline.isMatroska)
+                            } else {
+                                player.play(titleId: detail.card.id, episodeId: ep.id, title: detail.card.title)
+                            }
                         }
                     }
                 }
@@ -359,87 +423,144 @@ struct TitleDetailView: View {
     // MARK: Información
 
     @ViewBuilder
-    private func info(_ detail: TitleDetail) -> some View {
+    private func info(_ card: TitleCard, _ detail: TitleDetail) -> some View {
+        let author = detail.authors.joined(separator: ", ")
+        let castText = detail.cast.prefix(12).map {
+            $0.character.isEmpty ? $0.name : "\($0.name) (\($0.character))"
+        }.joined(separator: ", ")
         let rows: [(String, String)] = [
-            ("Dirección", detail.directors.joined(separator: ", ")),
-            ("Reparto", detail.cast.prefix(8).map { $0.character.isEmpty ? $0.name : "\($0.name) (\($0.character))" }.joined(separator: ", ")),
+            ("Autor", author),
+            ("Duración", card.durationText ?? ""),
+            ("Reparto", castText),
             ("Idiomas", detail.languages.map(\.name).joined(separator: ", ")),
             ("Subtítulos", detail.subtitleLanguages.map(\.name).joined(separator: ", ")),
         ].filter { !$0.1.isEmpty }
-        if !rows.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(rows.indices, id: \.self) { index in
-                    let row = rows[index]
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.0).font(.system(size: 12.5, weight: .bold)).foregroundColor(Theme.muted)
-                        Text(row.1).font(.system(size: 14)).foregroundColor(Theme.text2).fixedSize(horizontal: false, vertical: true)
+
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Información")
+                .font(.system(size: 19, weight: .bold))
+                .foregroundColor(Theme.text)
+
+            if !rows.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(rows.indices, id: \.self) { index in
+                        let row = rows[index]
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(row.0)
+                                .font(.system(size: 12.5, weight: .bold))
+                                .foregroundColor(Theme.muted)
+                            Text(row.1)
+                                .font(.system(size: 14.5))
+                                .foregroundColor(Theme.text2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
-            .padding(.top, 6)
+
+            if !detail.tags.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Etiquetas")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundColor(Theme.muted)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(detail.tags, id: \.self) { tag in
+                                Text(tag)
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundColor(Theme.text2)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Theme.surface2, in: Capsule())
+                                    .overlay(Capsule().stroke(Theme.line, lineWidth: 1))
+                            }
+                        }
+                    }
+                }
+            }
         }
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 struct EpisodeRow: View {
     let episode: Episode
     var current = false
+    var titleId: String = ""
+    var seriesTitle: String = ""
+    var poster: URL? = nil
     let onPlay: () -> Void
 
     var body: some View {
-        Button(action: onPlay) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    RemoteImage(episode.thumbnail, maxPixel: 400, placeholderIcon: "play.rectangle")
-                    if episode.playable {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(.white)
-                            .frame(width: 32, height: 32)
-                            .background(.black.opacity(0.5), in: Circle())
-                    }
-                    if let p = episode.progress, p.percent > 0 {
-                        VStack { Spacer(); ProgressBar(value: Double(p.percent) / 100, height: 3).padding(5) }
-                    }
-                }
-                .frame(width: 130, height: 73)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).stroke(current ? Theme.accent2 : Color.white.opacity(0.06), lineWidth: current ? 1.5 : 1))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("\(episode.number ?? 0). \(episode.title)")
-                        .font(.system(size: 14.5, weight: .semibold))
-                        .foregroundColor(Theme.text)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    HStack(spacing: 6) {
-                        if let d = Format.duration(minutes: episode.durationMin) { Text(d) }
-                        if let p = episode.progress, p.completed {
-                            Label("Visto", systemImage: "checkmark.circle.fill").foregroundColor(Theme.ok)
+        HStack(alignment: .top, spacing: 8) {
+            Button(action: onPlay) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RemoteImage(episode.thumbnail, maxPixel: 400, placeholderIcon: "play.rectangle")
+                        if episode.playable {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 32, height: 32)
+                                .background(.black.opacity(0.5), in: Circle())
+                        }
+                        if let p = episode.progress, p.percent > 0 {
+                            VStack { Spacer(); ProgressBar(value: Double(p.percent) / 100, height: 3).padding(5) }
                         }
                     }
-                    .font(.system(size: 12))
-                    .foregroundColor(Theme.muted)
-                    if let release = ISODate.display(episode.releaseAt) {
-                        Text("Se estrena el \(release)")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(Theme.accent2)
-                    } else if !episode.synopsis.isEmpty {
-                        Text(episode.synopsis)
-                            .font(.system(size: 12.5))
-                            .foregroundColor(Theme.text2)
+                    .frame(width: 130, height: 73)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).stroke(current ? Theme.accent2 : Color.white.opacity(0.06), lineWidth: current ? 1.5 : 1))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(episode.number ?? 0). \(episode.title)")
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .foregroundColor(Theme.text)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
+                        HStack(spacing: 6) {
+                            if let d = Format.duration(minutes: episode.durationMin) { Text(d) }
+                            if let p = episode.progress, p.completed {
+                                Label("Visto", systemImage: "checkmark.circle.fill").foregroundColor(Theme.ok)
+                            }
+                        }
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.muted)
+                        if let release = ISODate.display(episode.releaseAt) {
+                            Text("Se estrena el \(release)")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(Theme.accent2)
+                        } else if !episode.synopsis.isEmpty {
+                            Text(episode.synopsis)
+                                .font(.system(size: 12.5))
+                                .foregroundColor(Theme.text2)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
                     }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
+            .buttonStyle(PressableStyle())
+            .disabled(!episode.playable)
+            .opacity(episode.playable || episode.releaseAt != nil ? 1 : 0.55)
+
+            if episode.playable, !titleId.isEmpty {
+                OfflineDownloadButton(
+                    titleId: titleId,
+                    episodeId: episode.id,
+                    displayTitle: seriesTitle,
+                    subtitle: "E\(episode.number ?? 0). \(episode.title)",
+                    poster: episode.thumbnail ?? poster,
+                    isEpisode: true,
+                    compact: true
+                )
+                .padding(.top, 20)
+            }
         }
-        .buttonStyle(PressableStyle())
-        .disabled(!episode.playable)
-        .opacity(episode.playable || episode.releaseAt != nil ? 1 : 0.55)
         .accessibilityLabel(Text("Episodio \(episode.number ?? 0), \(episode.title)"))
     }
 }

@@ -16,6 +16,12 @@ struct SPLIVMAXApp: App {
                 .environmentObject(network)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent2)
+                .onAppear {
+                    let store = session
+                    OfflineDownloadManager.shared.onMessage = { message, isError in
+                        store.show(message, isError ? .error : .success)
+                    }
+                }
         }
     }
 }
@@ -30,6 +36,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
         Appearance.configure()
         return true
+    }
+
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        Task { @MainActor in
+            guard identifier == OfflineDownloadManager.sessionIdentifier else {
+                completionHandler()
+                return
+            }
+            OfflineDownloadManager.shared.handleBackgroundEvents(completionHandler)
+        }
     }
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
