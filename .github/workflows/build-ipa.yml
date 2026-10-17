@@ -15,11 +15,42 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Descargar plataforma iOS (si falta en el runner)
+        run: |
+          xcodebuild -downloadPlatform iOS || true
+          xcodebuild -showsdks | grep -i iphone || true
+
+      - name: Resolver paquetes SPM (MobileVLCKit)
+        run: |
+          xcodebuild -project SPLIVMAX.xcodeproj -scheme SPLIVMAX \
+            -derivedDataPath build -resolvePackageDependencies
+
       - name: Compilar (sin firma)
         run: |
+          set -o pipefail
           xcodebuild -project SPLIVMAX.xcodeproj -scheme SPLIVMAX -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee build.log
+
+      # Los errores del compilador quedan como anotaciones visibles en el resumen de la ejecución.
+      - name: Mostrar errores de compilación
+        if: failure()
+        run: |
+          grep -E '^/.+:[0-9]+:[0-9]+: (fatal )?error: ' build.log | sort -u | head -40 > errors.txt || true
+          while IFS= read -r line; do
+            path="${line%%:*}"; rest="${line#*:}"
+            ln="${rest%%:*}"; rest="${rest#*:}"
+            col="${rest%%:*}"; rest="${rest#*:}"
+            msg="${rest#*: }"; msg="${msg//%/%25}"
+            echo "::error file=${path#$GITHUB_WORKSPACE/},line=$ln,col=$col::$msg"
+          done < errors.txt
+          { grep -E 'error:' build.log | grep -vE '^/.+:[0-9]+:[0-9]+: ' || true
+            grep -A8 'The following build commands failed' build.log || true
+          } | awk 'NF && !seen[$0]++' | head -25 | while IFS= read -r line; do
+            echo "::error::${line//%/%25}"
+          done
 
       - name: Empaquetar IPA
         run: |

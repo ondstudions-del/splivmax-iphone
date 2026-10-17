@@ -694,6 +694,26 @@ struct Plan: Codable, Hashable, Identifiable {
         benefits = c.lossyStrings(.benefits)
         current = try? c.decodeIfPresent(Bool.self, forKey: .current)
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(description, forKey: .description)
+        try c.encode(price, forKey: .price)
+        try c.encode(currency, forKey: .currency)
+        try c.encode(durationDays, forKey: .durationDays)
+        try c.encode(tier, forKey: .tier)
+        try c.encode(ads, forKey: .ads)
+        try c.encode(maxStreams, forKey: .maxStreams)
+        try c.encode(maxProfiles, forKey: .maxProfiles)
+        try c.encode(maxQuality, forKey: .maxQuality)
+        try c.encode(dailyPlayLimit, forKey: .dailyPlayLimit)
+        try c.encode(history, forKey: .history)
+        try c.encode(promoLabel, forKey: .promoLabel)
+        try c.encode(benefits, forKey: .benefits)
+        try c.encodeIfPresent(current, forKey: .current)
+    }
 }
 
 struct TrialState: Codable, Hashable {
