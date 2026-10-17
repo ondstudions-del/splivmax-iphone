@@ -78,6 +78,7 @@ final class APIClient: @unchecked Sendable {
         config.httpAdditionalHeaders = [
             "Accept": "application/json",
             "Accept-Language": "es",
+            "User-Agent": "SPLIVMAX-iOS/\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0") (VLCKit; mkv)",
         ]
         session = URLSession(configuration: config)
         deviceId = KeychainStore.deviceId
@@ -109,7 +110,6 @@ final class APIClient: @unchecked Sendable {
                 throw CancellationError()
             } catch {
                 attempt += 1
-                // Una conexión móvil inestable suele fallar una vez y recuperarse: se reintenta sólo lo idempotente.
                 if method == .get, attempt < 3, Self.isTransient(error) {
                     try await Task.sleep(nanoseconds: UInt64(attempt) * 600_000_000)
                     continue
@@ -120,7 +120,8 @@ final class APIClient: @unchecked Sendable {
     }
 
     private func makeRequest(_ method: Method, _ path: String, query: [String: String], body: [String: Any]?, authorized: Bool) throws -> URLRequest {
-        guard var components = URLComponents(string: AppConfig.apiBase + path) else {
+        let resolved = Self.resolvePath(path)
+        guard var components = URLComponents(string: AppConfig.apiBase + resolved) else {
             throw APIError(status: 0, code: "bad_url", message: "Dirección no válida.")
         }
         let items = query.filter { !$0.value.isEmpty }.map { URLQueryItem(name: $0.key, value: $0.value) }.sorted { $0.name < $1.name }
@@ -130,9 +131,13 @@ final class APIClient: @unchecked Sendable {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method.rawValue
+        request.setValue(AppConfig.appKey, forHTTPHeaderField: "X-Api-Key")
         request.setValue(AppConfig.appKey, forHTTPHeaderField: "X-App-Key")
         request.setValue(deviceId, forHTTPHeaderField: "X-Device-Id")
         request.setValue(AppConfig.version, forHTTPHeaderField: "X-App-Version")
+        request.setValue(AppConfig.platform, forHTTPHeaderField: "X-Platform")
+        request.setValue("splivmax-ios", forHTTPHeaderField: "X-Client")
+        request.setValue(AppConfig.playerCapabilities, forHTTPHeaderField: "X-Player-Capabilities")
         if authorized, let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -144,35 +149,92 @@ final class APIClient: @unchecked Sendable {
         return request
     }
 
+    /// Alias de rutas antiguas de la app → rutas reales de /v1.
+    private static func resolvePath(_ path: String) -> String {
+        if path.hasPrefix("/titles/") { return "/title/" + path.dropFirst("/titles/".count) }
+        if path == "/my-list" { return "/favorites" }
+        if path == "/playback/progress" { return "/playback/progress" }
+        return path
+    }
+
     private func handle<T: Decodable>(data: Data, response: URLResponse, as type: T.Type) throws -> (data: T, meta: PageMeta?) {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if (200..<300).contains(status) {
             do {
-                let envelope = try decoder.decode(Envelope<T>.self, from: data)
-                return (envelope.data, envelope.meta)
+                return try decodeSuccess(data, as: T.self)
             } catch {
                 #if DEBUG
                 print("[API] No se pudo decodificar \(T.self):", error)
+                if let raw = String(data: data.prefix(400), encoding: .utf8) { print(raw) }
                 #endif
                 throw APIError(status: status, code: "decode", message: "No pudimos leer la respuesta del servidor. Actualiza la app o inténtalo más tarde.")
             }
         }
-        let error: APIError
-        if let body = try? decoder.decode(ErrorEnvelope.self, from: data).error {
-            error = APIError(status: status, code: body.code, message: body.message, fields: body.fields)
-        } else if status >= 500 {
-            error = APIError(status: status, code: "server", message: "El servidor no responde en este momento. Inténtalo en unos minutos.")
-        } else {
-            error = APIError(status: status, code: "http_\(status)", message: "No se pudo completar la solicitud (\(status)).")
-        }
+        let error = parseError(data: data, status: status)
         if ["token_invalid", "profile_setup", "profile_required", "maintenance"].contains(error.code) {
             NotificationCenter.default.post(name: .apiSessionEvent, object: nil, userInfo: ["error": error])
         }
         throw error
     }
 
+    private func decodeSuccess<T: Decodable>(_ data: Data, as type: T.Type) throws -> (data: T, meta: PageMeta?) {
+        let meta = (try? decoder.decode(MetaEnvelope.self, from: data).meta)
+        if let envelope = try? decoder.decode(Envelope<T>.self, from: data) {
+            return (envelope.data, envelope.meta ?? meta)
+        }
+        if let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let nested = root["data"] {
+                let nestedData = try JSONSerialization.data(withJSONObject: nested)
+                if let value = try? decoder.decode(T.self, from: nestedData) {
+                    return (value, meta)
+                }
+            }
+            if let items = root["items"] {
+                let itemsData = try JSONSerialization.data(withJSONObject: items)
+                if let value = try? decoder.decode(T.self, from: itemsData) {
+                    return (value, meta)
+                }
+            }
+            if let item = root["item"] {
+                let itemData = try JSONSerialization.data(withJSONObject: item)
+                if let value = try? decoder.decode(T.self, from: itemData) {
+                    return (value, meta)
+                }
+            }
+        }
+        let value = try decoder.decode(T.self, from: data)
+        return (value, meta)
+    }
+
+    private func parseError(data: Data, status: Int) -> APIError {
+        if let body = try? decoder.decode(ErrorEnvelope.self, from: data).error {
+            return APIError(status: status, code: body.code, message: body.message, fields: body.fields)
+        }
+        if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let err = root["error"] as? [String: Any] {
+                return APIError(
+                    status: status,
+                    code: (err["code"] as? String) ?? "http_\(status)",
+                    message: (err["message"] as? String) ?? "No se pudo completar la solicitud.",
+                    fields: (err["fields"] as? [String: String]) ?? [:]
+                )
+            }
+            if let message = root["error"] as? String {
+                return APIError(status: status, code: "http_\(status)", message: message)
+            }
+        }
+        if status >= 500 {
+            return APIError(status: status, code: "server", message: "El servidor no responde en este momento. Inténtalo en unos minutos.")
+        }
+        return APIError(status: status, code: "http_\(status)", message: "No se pudo completar la solicitud (\(status)).")
+    }
+
     private static func isTransient(_ error: Error) -> Bool {
         guard let url = error as? URLError else { return false }
         return [.timedOut, .networkConnectionLost, .cannotConnectToHost, .dnsLookupFailed, .notConnectedToInternet].contains(url.code)
     }
+}
+
+private struct MetaEnvelope: Decodable {
+    let meta: PageMeta?
 }

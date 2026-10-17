@@ -1,8 +1,8 @@
 # SPLIVMAX para iPhone — compilación, TestFlight y App Store
 
 App nativa en Swift/SwiftUI (iOS 16 o superior, solo iPhone) que usa la API privada
-`https://splivmax.ond-s.com/api/v1`. **No es una WebView**: todas las pantallas y el
-reproductor (AVPlayer) son nativos.
+`https://splivmax.ond-s.com/v1`. **No es una WebView**: todas las pantallas son nativas.
+El reproductor usa **AVPlayer** (HLS/MP4) y **MobileVLCKit** para archivos **MKV**.
 
 > Estado: la app **no está publicada**. Solo lo estará cuando Apple apruebe la revisión
 > en App Store Connect.
@@ -15,7 +15,7 @@ reproductor (AVPlayer) son nativos.
 | `SPLIVMAX/Core` | Cliente de la API, modelos, Keychain, red, caché de imágenes, sesión |
 | `SPLIVMAX/Design` | Colores y componentes con la identidad de la web |
 | `SPLIVMAX/Features` | Pantallas: inicio, series, películas, búsqueda, ficha, perfil, planes, etc. |
-| `SPLIVMAX/Features/Player` | Reproductor propio (HLS/MP4, subtítulos, audio, PiP, AirPlay) |
+| `SPLIVMAX/Features/Player` | Reproductor propio (HLS/MP4 con AVPlayer; MKV con VLCKit) |
 
 ## 2. Configuración antes de compilar
 
@@ -28,9 +28,11 @@ En Xcode › proyecto **SPLIVMAX** › target **SPLIVMAX** › *Signing & Capabi
 | `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` | `2.0` / `5` | Subir el número de compilación en cada envío |
 | `SPX_BILLING_MODE` | `reader` | **Dejar `reader` para el App Store** (ver punto 5) |
 
-- La URL de la API está en `Info.plist` › `SPXAPIBaseURL`.
-- La clave de app (`spx_ios_…`) está en `AppConfig.swift`. Identifica a la app, no a un
+- La URL de la API está en `Info.plist` › `SPXAPIBaseURL` → `https://splivmax.ond-s.com/v1`.
+- La clave de app (`onds_ios_…`) está en `AppConfig.swift`. Identifica a la app, no a un
   usuario. Si se filtra, se revoca y se crea otra en el panel › *Apps y API*.
+- La app envía `X-Player-Capabilities: mkv,vlc` para que el servidor entregue fuentes MKV.
+- En Xcode: *File › Packages › Resolve Package Versions* (descarga MobileVLCKit, ~200 MB).
 - El icono es `Assets.xcassets/AppIcon` (1024×1024, sin transparencia). La pantalla de
   arranque usa el color `LaunchBackground` y el logotipo `LogoMark`.
 

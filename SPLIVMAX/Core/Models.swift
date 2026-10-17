@@ -165,6 +165,72 @@ struct TitleCard: Codable, Hashable, Identifiable {
         f.dateFormat = "d 'de' MMMM"
         return "Se estrena el \(f.string(from: date))"
     }
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, title, year, ageRating, durationMin, seasons, episodes, synopsis
+        case genres, poster, banner, backdrop, access, playable, imdbRating, releaseAt, rating, duration
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        type = (try? c.decode(String.self, forKey: .type)) ?? "movie"
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        year = c.flexInt(.year)
+        ageRating = (try? c.decode(String.self, forKey: .ageRating))
+            ?? (try? c.decode(String.self, forKey: .rating))
+        if let min = c.flexInt(.durationMin) {
+            durationMin = min
+        } else if let n = c.flexInt(.duration) {
+            durationMin = n
+        } else {
+            durationMin = nil
+        }
+        seasons = c.flexInt(.seasons)
+        episodes = c.flexInt(.episodes)
+        synopsis = try? c.decodeIfPresent(String.self, forKey: .synopsis)
+        if let g = try? c.decode([Genre].self, forKey: .genres) {
+            genres = g
+        } else if let names = try? c.decode([String].self, forKey: .genres) {
+            genres = names.map { Genre(slug: $0.lowercased().replacingOccurrences(of: " ", with: "-"), name: $0) }
+        } else {
+            genres = []
+        }
+        poster = Self.absURL(try? c.decodeIfPresent(String.self, forKey: .poster))
+        banner = Self.absURL(try? c.decodeIfPresent(String.self, forKey: .banner))
+        backdrop = Self.absURL(try? c.decodeIfPresent(String.self, forKey: .backdrop))
+        access = (try? c.decode(String.self, forKey: .access)) ?? "free"
+        playable = (try? c.decode(Bool.self, forKey: .playable)) ?? true
+        imdbRating = try? c.decodeIfPresent(Double.self, forKey: .imdbRating)
+        releaseAt = try? c.decodeIfPresent(String.self, forKey: .releaseAt)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(type, forKey: .type)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(year, forKey: .year)
+        try c.encodeIfPresent(ageRating, forKey: .ageRating)
+        try c.encodeIfPresent(durationMin, forKey: .durationMin)
+        try c.encodeIfPresent(seasons, forKey: .seasons)
+        try c.encodeIfPresent(episodes, forKey: .episodes)
+        try c.encodeIfPresent(synopsis, forKey: .synopsis)
+        try c.encode(genres, forKey: .genres)
+        try c.encodeIfPresent(poster, forKey: .poster)
+        try c.encodeIfPresent(banner, forKey: .banner)
+        try c.encodeIfPresent(backdrop, forKey: .backdrop)
+        try c.encode(access, forKey: .access)
+        try c.encode(playable, forKey: .playable)
+        try c.encodeIfPresent(imdbRating, forKey: .imdbRating)
+        try c.encodeIfPresent(releaseAt, forKey: .releaseAt)
+    }
+
+    private static func absURL(_ raw: String?) -> URL? {
+        guard let raw, !raw.isEmpty else { return nil }
+        if let u = URL(string: raw), u.scheme != nil { return u }
+        return URL(string: "https://splivmax.ond-s.com" + (raw.hasPrefix("/") ? raw : "/" + raw))
+    }
 }
 
 struct WatchProgress: Codable, Hashable {
@@ -367,6 +433,38 @@ struct User: Codable, Hashable {
     let subtitleLanguage: String
     let staff: Bool
     let createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, email, emailVerified, avatar, avatarUrl, language, subtitleLanguage, staff, createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = (try? c.decode(String.self, forKey: .name)) ?? ""
+        email = (try? c.decode(String.self, forKey: .email)) ?? ""
+        emailVerified = (try? c.decode(Bool.self, forKey: .emailVerified)) ?? true
+        avatar = (try? c.decode(String.self, forKey: .avatar)) ?? "1"
+        avatarUrl = try? c.decodeIfPresent(URL.self, forKey: .avatarUrl)
+        language = (try? c.decode(String.self, forKey: .language)) ?? "es"
+        subtitleLanguage = (try? c.decode(String.self, forKey: .subtitleLanguage)) ?? "off"
+        staff = (try? c.decode(Bool.self, forKey: .staff)) ?? false
+        createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(email, forKey: .email)
+        try c.encode(emailVerified, forKey: .emailVerified)
+        try c.encode(avatar, forKey: .avatar)
+        try c.encodeIfPresent(avatarUrl, forKey: .avatarUrl)
+        try c.encode(language, forKey: .language)
+        try c.encode(subtitleLanguage, forKey: .subtitleLanguage)
+        try c.encode(staff, forKey: .staff)
+        try c.encodeIfPresent(createdAt, forKey: .createdAt)
+    }
 }
 
 struct Profile: Codable, Hashable, Identifiable {
@@ -449,6 +547,31 @@ struct Plan: Codable, Hashable, Identifiable {
         default: return "SD \(maxQuality)p"
         }
     }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, description, price, currency, durationDays, tier, ads
+        case maxStreams, maxProfiles, maxQuality, dailyPlayLimit, history, promoLabel, benefits, current
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = (try? c.decode(String.self, forKey: .name)) ?? ""
+        description = (try? c.decode(String.self, forKey: .description)) ?? ""
+        price = (try? c.decode(Double.self, forKey: .price)) ?? 0
+        currency = (try? c.decode(String.self, forKey: .currency)) ?? "USD"
+        durationDays = c.flexInt(.durationDays) ?? 0
+        tier = (try? c.decode(String.self, forKey: .tier)) ?? "free"
+        ads = (try? c.decode(Bool.self, forKey: .ads)) ?? false
+        maxStreams = c.flexInt(.maxStreams) ?? 1
+        maxProfiles = c.flexInt(.maxProfiles) ?? 5
+        maxQuality = c.flexInt(.maxQuality) ?? 720
+        dailyPlayLimit = c.flexInt(.dailyPlayLimit) ?? 0
+        history = (try? c.decode(Bool.self, forKey: .history)) ?? true
+        promoLabel = (try? c.decode(String.self, forKey: .promoLabel)) ?? ""
+        benefits = c.lossyStrings(.benefits)
+        current = try? c.decodeIfPresent(Bool.self, forKey: .current)
+    }
 }
 
 struct TrialState: Codable, Hashable {
@@ -495,6 +618,31 @@ struct AuthSession: Decodable {
     let verificationRequired: Bool?
     let trialDays: Int?
     let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case token, user, profileSetup, profileRequired, profile, profiles
+        case verificationRequired, trialDays, message, accessToken
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let s = try? c.decode(String.self, forKey: .token) {
+            token = s
+        } else if let nested = try? c.decode([String: JSONValue].self, forKey: .token),
+                  let access = nested["access_token"]?.string ?? nested["accessToken"]?.string {
+            token = access
+        } else {
+            token = try? c.decodeIfPresent(String.self, forKey: .accessToken)
+        }
+        user = try? c.decodeIfPresent(User.self, forKey: .user)
+        profileSetup = try? c.decodeIfPresent(Bool.self, forKey: .profileSetup)
+        profileRequired = try? c.decodeIfPresent(Bool.self, forKey: .profileRequired)
+        profile = try? c.decodeIfPresent(Profile.self, forKey: .profile)
+        profiles = try? c.decodeIfPresent([Profile].self, forKey: .profiles)
+        verificationRequired = try? c.decodeIfPresent(Bool.self, forKey: .verificationRequired)
+        trialDays = c.flexInt(.trialDays)
+        message = try? c.decodeIfPresent(String.self, forKey: .message)
+    }
 }
 
 struct MessageResponse: Decodable {
@@ -616,6 +764,33 @@ struct PlaybackSource: Decodable, Hashable {
     let hls: Bool
     let quality: Int
     let label: String
+
+    var isMatroska: Bool {
+        let t = type.lowercased()
+        if t.contains("matroska") || t.contains("mkv") { return true }
+        let path = url.path.lowercased()
+        if path.hasSuffix(".mkv") { return true }
+        return url.absoluteString.lowercased().contains(".mkv")
+    }
+
+    enum CodingKeys: String, CodingKey { case url, src, type, hls, quality, label }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = (try? c.decode(String.self, forKey: .url))
+            ?? (try? c.decode(String.self, forKey: .src))
+            ?? ""
+        guard let parsed = URL(string: raw), parsed.scheme != nil else {
+            throw DecodingError.dataCorruptedError(forKey: .url, in: c, debugDescription: "URL de fuente inválida")
+        }
+        url = parsed
+        type = (try? c.decode(String.self, forKey: .type)) ?? "video/mp4"
+        hls = (try? c.decode(Bool.self, forKey: .hls))
+            ?? type.contains("mpegurl")
+            || parsed.pathExtension.lowercased() == "m3u8"
+        quality = c.flexInt(.quality) ?? 720
+        label = (try? c.decode(String.self, forKey: .label)) ?? "\(quality)p"
+    }
 }
 
 struct PlaybackSubtitle: Decodable, Hashable, Identifiable {

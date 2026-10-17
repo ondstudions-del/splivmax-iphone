@@ -89,11 +89,13 @@ final class SessionStore: ObservableObject {
             let me: MeData = try await api.send(.get, "/me")
             apply(me: me)
             Self.storeMe(me)
-            if me.profile == nil {
-                await loadProfiles()
+            await loadProfiles()
+            if profilesData?.setupPending == true {
+                phase = .profileSetup
+            } else if me.profile == nil || profilesNeedChoice {
                 profileChoiceRequired = true
-                phase = (profilesData?.setupPending ?? false) ? .profileSetup : .profileChoice
-            } else if phase == .launching || phase == .guest {
+                phase = .profileChoice
+            } else if phase == .launching || phase == .guest || phase == .profileSetup {
                 phase = .ready
             }
         } catch let error as APIError where error.code == "token_invalid" {

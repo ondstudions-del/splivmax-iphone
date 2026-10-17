@@ -88,8 +88,11 @@ final class PlayerController: NSObject, ObservableObject {
     @Published private(set) var hasVideo = false
     /// Sin conexión: el vídeo sigue solo en cuanto vuelva la red.
     @Published private(set) var waitingForNetwork = false
+    /// Motor VLC activo (MKV / Matroska). AVPlayer no puede abrir esos contenedores en iOS.
+    @Published private(set) var usesVLC = false
 
     let player = AVPlayer()
+    let vlc = VLCPlayerEngine()
     private(set) var request: PlayRequest
     private let api = APIClient.shared
     private let network = NetworkMonitor.shared
@@ -232,18 +235,25 @@ final class PlayerController: NSObject, ObservableObject {
         player.volume = 1
     }
 
-    /// HLS primero (se adapta solo); en ahorro de datos, el MP4 más ligero antes que el de más calidad.
+    /// HLS/MP4 primero (AVPlayer); MKV al final (motor VLC).
     private func order(_ sources: [PlaybackSource]) -> [PlaybackSource] {
         let hls = sources.filter(\.hls).sorted { $0.quality > $1.quality }
-        var files = sources.filter { !$0.hls }.sorted { $0.quality > $1.quality }
+        var files = sources.filter { !$0.hls && !$0.isMatroska }.sorted { $0.quality > $1.quality }
+        let mkv = sources.filter(\.isMatroska).sorted { $0.quality > $1.quality }
         if lowData || !network.isOnline { files.reverse() }
-        return hls + files
+        return hls + files + mkv
     }
 
     private func load(_ source: PlaybackSource, at time: Double) {
+        currentSource = source
+        if source.isMatroska {
+            loadVLC(source, at: time)
+            return
+        }
+        stopVLC()
+        usesVLC = false
         removeItemObservers()
         let shouldPlay = !userPaused
-        // El vídeo puede usar cualquier red disponible (Wi-Fi, datos móviles o modo datos reducidos).
         let options: [String: Any] = [
             AVURLAssetPreferPreciseDurationAndTimingKey: false,
             AVURLAssetAllowsCellularAccessKey: true,
@@ -252,13 +262,9 @@ final class PlayerController: NSObject, ObservableObject {
         ]
         let asset = AVURLAsset(url: source.url, options: options)
         let item = AVPlayerItem(asset: asset)
-        // Búfer corto para arrancar (y no descargar de más antes de saltar al punto guardado);
-        // al empezar a reproducir se amplía según la red.
         item.preferredForwardBufferDuration = 4
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
-        // Empieza por la primera calidad que cumple los topes en lugar de medir la red antes de arrancar.
         item.startsOnFirstEligibleVariant = true
-        currentSource = source
         pendingSeek = time > 5 ? time : nil
         rampedUp = false
         smoothSince = nil
@@ -269,17 +275,82 @@ final class PlayerController: NSObject, ObservableObject {
         applyBitrate(to: item, startup: true)
         observe(item)
         if pendingSeek != nil && player.rate != 0 {
-            // Se detiene sin que cuente como pausa: el vídeo sigue en cuanto llega al punto donde iba.
             switchingItem = true
             player.pause()
         }
         player.replaceCurrentItem(with: item)
         isBuffering = true
-        // Sin punto guardado se pide reproducir ya: AVPlayer empieza en cuanto tiene datos.
         if pendingSeek == nil && shouldPlay {
             player.defaultRate = rate
             player.play()
         }
+    }
+
+    private func loadVLC(_ source: PlaybackSource, at time: Double) {
+        removeItemObservers()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        usesVLC = true
+        isBuffering = true
+        hasVideo = false
+        phase = .loading
+        pendingSeek = nil
+        lastDataAt = Date()
+        vlc.open(url: source.url, startAt: time)
+        bindVLC()
+        if !userPaused { vlc.play() }
+    }
+
+    private func stopVLC() {
+        vlcBag = []
+        vlc.stop()
+        usesVLC = false
+    }
+
+    private var vlcBag = Set<AnyCancellable>()
+
+    private func bindVLC() {
+        vlcBag = []
+        vlc.$isPlaying.receive(on: DispatchQueue.main).sink { [weak self] playing in
+            guard let self, self.usesVLC else { return }
+            self.isPlaying = playing
+            if playing {
+                self.isBuffering = false
+                self.phase = .playing
+                if !self.started {
+                    self.started = true
+                    self.report("start")
+                    self.startHeartbeat()
+                }
+                self.keepScreenAwake(true)
+            }
+        }.store(in: &vlcBag)
+        vlc.$isBuffering.receive(on: DispatchQueue.main).sink { [weak self] buffering in
+            guard let self, self.usesVLC else { return }
+            self.isBuffering = buffering
+        }.store(in: &vlcBag)
+        vlc.$currentTime.receive(on: DispatchQueue.main).sink { [weak self] t in
+            guard let self, self.usesVLC else { return }
+            if self.isPlaying, t > self.lastTick, t - self.lastTick < 1.5 {
+                self.watched += t - self.lastTick
+            }
+            self.lastTick = t
+            self.currentTime = t
+            self.updateCountdown(t)
+        }.store(in: &vlcBag)
+        vlc.$duration.receive(on: DispatchQueue.main).sink { [weak self] d in
+            guard let self, self.usesVLC, d > 0 else { return }
+            self.duration = d
+        }.store(in: &vlcBag)
+        vlc.$hasVideo.receive(on: DispatchQueue.main).sink { [weak self] ready in
+            guard let self, self.usesVLC, ready else { return }
+            self.hasVideo = true
+            self.phase = .playing
+        }.store(in: &vlcBag)
+        vlc.$failedMessage.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self] msg in
+            guard let self, self.usesVLC else { return }
+            self.sourceFailed(NSError(domain: "VLC", code: -1, userInfo: [NSLocalizedDescriptionKey: msg]))
+        }.store(in: &vlcBag)
     }
 
     /// Vídeo que se precarga en Wi-Fi (5 minutos); AVPlayer puede guardar menos si el iPhone va justo de memoria.
@@ -588,8 +659,17 @@ final class PlayerController: NSObject, ObservableObject {
     // MARK: Controles
 
     func play() {
-        guard phase != .loading || player.currentItem?.status == .readyToPlay else { return }
         userPaused = false
+        if usesVLC {
+            if phase == .ended {
+                seek(to: 0)
+                phase = .playing
+            }
+            activateAudio()
+            vlc.play()
+            return
+        }
+        guard phase != .loading || player.currentItem?.status == .readyToPlay else { return }
         if phase == .ended {
             seek(to: 0)
             phase = .playing
@@ -601,6 +681,12 @@ final class PlayerController: NSObject, ObservableObject {
 
     func pause() {
         userPaused = true
+        if usesVLC {
+            vlc.pause()
+            isPlaying = false
+            isBuffering = false
+            return
+        }
         if switchingItem {
             switchingItem = false
             isPlaying = false
@@ -620,9 +706,13 @@ final class PlayerController: NSObject, ObservableObject {
 
     func seek(to seconds: Double, precise: Bool = true) {
         let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
-        let tolerance = CMTime(seconds: precise ? 0.3 : 1, preferredTimescale: 600)
         currentTime = target
         if target < duration - Double(data?.settings.countdown ?? 10) - 1 { nextCountdown = nil }
+        if usesVLC {
+            vlc.seek(to: target)
+            return
+        }
+        let tolerance = CMTime(seconds: precise ? 0.3 : 1, preferredTimescale: 600)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: tolerance, toleranceAfter: tolerance)
     }
 
@@ -632,6 +722,10 @@ final class PlayerController: NSObject, ObservableObject {
 
     func setRate(_ value: Float) {
         rate = value
+        if usesVLC {
+            vlc.setRate(value)
+            return
+        }
         player.defaultRate = value
         if isPlaying { player.rate = value }
     }
@@ -1238,6 +1332,7 @@ final class PlayerController: NSObject, ObservableObject {
         closed = true
         stopHeartbeat()
         pip?.stopPictureInPicture()
+        stopVLC()
         player.pause()
         removeItemObservers()
         playerObservers.forEach { $0.invalidate() }

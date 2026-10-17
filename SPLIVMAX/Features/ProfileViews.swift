@@ -369,7 +369,13 @@ struct ManageProfilesView: View {
                         }
                         .buttonStyle(SecondaryButtonStyle())
                     } else if let message = data.limitMessage, !message.isEmpty {
-                        Text(message).font(.system(size: 13.5)).foregroundColor(Theme.muted)
+                        InlineNotice(message: message, icon: "person.2.fill", color: Theme.warn)
+                    } else if !(session.subscription?.premium ?? false) && !session.isKids {
+                        InlineNotice(
+                            message: "Los perfiles adicionales (familia, infantil, PIN) requieren un plan Pro / Premium.",
+                            icon: "star.fill",
+                            color: Theme.accent2
+                        )
                     }
                 }
             }

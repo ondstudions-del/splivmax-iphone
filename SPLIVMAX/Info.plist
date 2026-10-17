@@ -32,7 +32,7 @@
 		<false/>
 	</dict>
 	<key>SPXAPIBaseURL</key>
-	<string>https://splivmax.ond-s.com/api/v1</string>
+	<string>https://splivmax.ond-s.com/v1</string>
 	<key>SPXBillingMode</key>
 	<string>$(SPX_BILLING_MODE)</string>
 	<key>UIApplicationSceneManifest</key>

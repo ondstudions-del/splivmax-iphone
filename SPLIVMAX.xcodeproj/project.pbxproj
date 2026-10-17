@@ -31,6 +31,8 @@
 		5A1B0000000000000000B050 /* PlayerController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A050 /* PlayerController.swift */; };
 		5A1B0000000000000000B051 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A051 /* PlayerView.swift */; };
 		5A1B0000000000000000B052 /* Subtitles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A052 /* Subtitles.swift */; };
+		5A1B0000000000000000B053 /* VLCPlayerEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A053 /* VLCPlayerEngine.swift */; };
+		5A1B0000000000000000B060 /* MobileVLCKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5A1B0000000000000000P001 /* MobileVLCKit */; };
 		5A1B0000000000000000B008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5A1B0000000000000000A008 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -59,6 +61,7 @@
 		5A1B0000000000000000A050 /* PlayerController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerController.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A051 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A052 /* Subtitles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Subtitles.swift; sourceTree = "<group>"; };
+		5A1B0000000000000000A053 /* VLCPlayerEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VLCPlayerEngine.swift; sourceTree = "<group>"; };
 		5A1B0000000000000000A008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5A1B0000000000000000A009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5A1B0000000000000000A010 /* SPLIVMAX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SPLIVMAX.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -69,6 +72,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5A1B0000000000000000B060 /* MobileVLCKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -152,6 +156,7 @@
 				5A1B0000000000000000A050 /* PlayerController.swift */,
 				5A1B0000000000000000A051 /* PlayerView.swift */,
 				5A1B0000000000000000A052 /* Subtitles.swift */,
+				5A1B0000000000000000A053 /* VLCPlayerEngine.swift */,
 			);
 			path = Player;
 			sourceTree = "<group>";
@@ -180,6 +185,9 @@
 			dependencies = (
 			);
 			name = SPLIVMAX;
+			packageProductDependencies = (
+				5A1B0000000000000000P001 /* MobileVLCKit */,
+			);
 			productName = SPLIVMAX;
 			productReference = 5A1B0000000000000000A010 /* SPLIVMAX.app */;
 			productType = "com.apple.product-type.application";
@@ -209,6 +217,9 @@
 				Base,
 			);
 			mainGroup = 5A1B0000000000000000C001;
+			packageReferences = (
+				5A1B0000000000000000R001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */,
+			);
 			productRefGroup = 5A1B0000000000000000C003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -258,6 +269,7 @@
 				5A1B0000000000000000B050 /* PlayerController.swift in Sources */,
 				5A1B0000000000000000B051 /* PlayerView.swift in Sources */,
 				5A1B0000000000000000B052 /* Subtitles.swift in Sources */,
+				5A1B0000000000000000B053 /* VLCPlayerEngine.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -463,6 +475,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		5A1B0000000000000000R001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/showbie/MobileVLCKit-SPM";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.7.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5A1B0000000000000000P001 /* MobileVLCKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5A1B0000000000000000R001 /* XCRemoteSwiftPackageReference "MobileVLCKit-SPM" */;
+			productName = MobileVLCKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 5A1B0000000000000000E001 /* Project object */;
 }

@@ -37,10 +37,15 @@ struct PlayerView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                PlayerLayerView(player: controller.player, gravity: gravity) { layer in
-                    controller.attach(layer: layer)
+                if controller.usesVLC {
+                    VLCPlayerView(engine: controller.vlc)
+                        .ignoresSafeArea()
+                } else {
+                    PlayerLayerView(player: controller.player, gravity: gravity) { layer in
+                        controller.attach(layer: layer)
+                    }
+                    .ignoresSafeArea()
                 }
-                .ignoresSafeArea()
 
                 VolumeHost(controller: volume)
                     .frame(width: 1, height: 1)
@@ -333,7 +338,14 @@ struct PlayerView: View {
                 .frame(width: 36, height: 36)
                 .accessibilityLabel(Text("AirPlay"))
 
-            if controller.isPiPPossible {
+            if controller.usesVLC {
+                Text("MKV")
+                    .font(.system(size: 11, weight: .bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Theme.accent2.opacity(0.35), in: Capsule())
+                    .accessibilityLabel(Text("Reproductor MKV (VLC)"))
+            } else if controller.isPiPPossible {
                 Button { controller.togglePiP() } label: {
                     Image(systemName: controller.isPiPActive ? "pip.exit" : "pip.enter")
                         .font(.system(size: 18, weight: .semibold))
