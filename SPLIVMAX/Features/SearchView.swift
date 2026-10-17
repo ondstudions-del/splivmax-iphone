@@ -39,8 +39,17 @@ final class SearchModel: ObservableObject {
     }
 
     func loadGenres() async {
-        guard genres.isEmpty, let r: ItemsList<GenreCount> = try? await APIClient.shared.send(.get, "/genres") else { return }
-        genres = r.items
+        guard genres.isEmpty else { return }
+        // Preferir géneros con conteo real; filtrar vacíos al final
+        if let r: ItemsList<GenreCount> = try? await APIClient.shared.send(.get, "/genres") {
+            let withCount = r.items.filter { $0.count > 0 }
+            genres = withCount.isEmpty ? r.items : withCount
+            return
+        }
+        if let f: FilterData = try? await APIClient.shared.send(.get, "/filters") {
+            let withCount = f.genres.filter { $0.count > 0 }
+            genres = withCount.isEmpty ? f.genres : withCount
+        }
     }
 
     func remember(_ text: String) {
@@ -70,7 +79,7 @@ struct SearchView: View {
                         .frame(minHeight: 320)
                 } else if model.results.isEmpty && !model.searching && !model.searchedQuery.isEmpty {
                     EmptyStateView(icon: "magnifyingglass", title: "Sin resultados para «\(model.searchedQuery)»",
-                                   message: "Revisa la ortografía o busca por otro título, actor o género.")
+                                   message: "Prueba con otro título, género o palabras de la descripción.")
                         .padding(.top, 40)
                 } else {
                     if !model.searchedQuery.isEmpty {
@@ -101,7 +110,7 @@ struct SearchView: View {
                 .foregroundColor(Theme.text)
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass").foregroundColor(Theme.muted)
-                TextField("Películas, series, géneros…", text: $model.query)
+                TextField("Título, género o descripción…", text: $model.query)
                     .focused($focused)
                     .submitLabel(.search)
                     .autocorrectionDisabled()

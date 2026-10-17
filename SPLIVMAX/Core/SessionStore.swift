@@ -92,7 +92,10 @@ final class SessionStore: ObservableObject {
             await loadProfiles()
             if profilesData?.setupPending == true {
                 phase = .profileSetup
-            } else if me.profile == nil || profilesNeedChoice {
+            } else if me.profile == nil {
+                // Sin perfil activo: hay que elegir. La pantalla «¿Quién está viendo?»
+                // con varios perfiles la abre askWhoIsWatching(), no este refresh
+                // (si no, al tocar un perfil se vuelve al selector).
                 profileChoiceRequired = true
                 phase = .profileChoice
             } else if phase == .launching || phase == .guest || phase == .profileSetup {
@@ -259,6 +262,11 @@ final class SessionStore: ObservableObject {
         phase = .ready
         contentVersion += 1
         await refreshMe()
+        // Por si /me llega sin perfil o hay carrera con eventos de API: mantener la elección.
+        if profile != nil {
+            profileChoiceRequired = false
+            if phase == .profileChoice { phase = .ready }
+        }
     }
 
     func switchProfile() async {
@@ -334,7 +342,8 @@ final class SessionStore: ObservableObject {
         case "profile_setup":
             if api.token != nil, phase != .profileSetup { phase = .profileSetup }
         case "profile_required":
-            if api.token != nil, phase != .profileChoice {
+            // Ignorar si ya hay perfil activo (peticiones en vuelo anteriores a /select).
+            if api.token != nil, phase != .profileChoice, profile == nil {
                 profileChoiceRequired = true
                 phase = .profileChoice
                 Task { await loadProfiles() }

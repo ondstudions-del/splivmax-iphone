@@ -73,8 +73,12 @@ final class CatalogModel: ObservableObject {
     }
 
     private func loadFilters() async {
-        guard let f: FilterData = try? await APIClient.shared.send(.get, "/filters") else { return }
-        genres = f.genres
+        var query: [String: String] = [:]
+        if let type, !type.isEmpty { query["type"] = type }
+        guard let f: FilterData = try? await APIClient.shared.send(.get, "/filters", query: query) else { return }
+        // Chips con títulos reales primero; ocultar géneros vacíos si hay alguno con contenido
+        let withCount = f.genres.filter { $0.count > 0 }
+        genres = withCount.isEmpty ? f.genres : withCount
     }
 }
 
