@@ -60,13 +60,17 @@ final class SessionStore: ObservableObject {
             if let cached = Self.cachedMe() {
                 apply(me: cached)
                 phase = .ready
-                askWhoIsWatching()
+                // No pedir perfil aquí: el selector solo aparece al salir por completo de la app
+                // (o si aún no hay perfil activo).
             }
             await refreshMe()
             if phase == .launching {
                 phase = user == nil ? .guest : .ready
             }
-            if phase == .ready && !profileChoiceRequired { askWhoIsWatching() }
+            // Primer acceso / sin perfil: hay que elegir. Con perfil cacheado se entra directo.
+            if phase == .ready, profile == nil {
+                askWhoIsWatching()
+            }
         } else {
             phase = .guest
         }
@@ -92,12 +96,15 @@ final class SessionStore: ObservableObject {
             await loadProfiles()
             if profilesData?.setupPending == true {
                 phase = .profileSetup
-            } else if me.profile == nil {
-                // Sin perfil activo: hay que elegir. La pantalla «¿Quién está viendo?»
-                // con varios perfiles la abre askWhoIsWatching(), no este refresh
-                // (si no, al tocar un perfil se vuelve al selector).
-                profileChoiceRequired = true
-                phase = .profileChoice
+            } else if me.profile == nil && profile == nil {
+                // Sin perfil activo: hay que elegir. No forzar si ya hay uno en memoria
+                // ni si estamos sin red (Offline / perfil reciente).
+                if NetworkMonitor.shared.isOnline {
+                    profileChoiceRequired = true
+                    phase = .profileChoice
+                } else if phase == .launching || phase == .guest {
+                    phase = .ready
+                }
             } else if phase == .launching || phase == .guest || phase == .profileSetup {
                 phase = .ready
             }
@@ -226,9 +233,14 @@ final class SessionStore: ObservableObject {
         return UserDefaults.standard.bool(forKey: Self.chooseProfileKey)
     }
 
-    /// Al abrir la app o volver a ella hay que elegir perfil (como en la web y en las apps de TV).
+    /// Selector de perfiles: solo tras salir por completo de la app (o si no hay perfil activo).
+    /// No se usa al perder la red ni en cada arranque con perfil ya elegido.
     func askWhoIsWatching() {
         guard isLoggedIn, phase == .ready else { return }
+        // Sin internet: no interrumpir; el perfil actual y Offline siguen disponibles.
+        if !NetworkMonitor.shared.isOnline {
+            return
+        }
         if profilesNeedChoice {
             profileChoiceRequired = true
             phase = .profileChoice
@@ -236,7 +248,7 @@ final class SessionStore: ObservableObject {
         } else {
             Task {
                 await loadProfiles()
-                guard phase == .ready, profilesNeedChoice else { return }
+                guard phase == .ready, NetworkMonitor.shared.isOnline, profilesNeedChoice else { return }
                 profileChoiceRequired = true
                 phase = .profileChoice
             }
@@ -277,6 +289,13 @@ final class SessionStore: ObservableObject {
 
     func cancelProfileChoice() {
         if profile != nil && !profileChoiceRequired { phase = .ready }
+    }
+
+    /// Fuerza volver al contenido (p. ej. offline con perfil ya activo).
+    func forceReadyWithCurrentProfile() {
+        guard profile != nil else { return }
+        profileChoiceRequired = false
+        phase = .ready
     }
 
     func saveProfile(id: String?, body: [String: Any]) async throws -> Profile {
@@ -342,8 +361,8 @@ final class SessionStore: ObservableObject {
         case "profile_setup":
             if api.token != nil, phase != .profileSetup { phase = .profileSetup }
         case "profile_required":
-            // Ignorar si ya hay perfil activo (peticiones en vuelo anteriores a /select).
-            if api.token != nil, phase != .profileChoice, profile == nil {
+            // Ignorar si ya hay perfil activo, o si estamos offline (no bloquear Offline).
+            if api.token != nil, phase != .profileChoice, profile == nil, NetworkMonitor.shared.isOnline {
                 profileChoiceRequired = true
                 phase = .profileChoice
                 Task { await loadProfiles() }

@@ -140,16 +140,20 @@ struct PlayerView: View {
         .onAppear {
             OrientationController.setLandscape(true)
             originalBrightness = ScreenBrightness.value
+            UIApplication.shared.isIdleTimerDisabled = true
             scheduleHide()
         }
         .task { await controller.start() }
         .onDisappear {
             hideTask?.cancel()
+            UIApplication.shared.isIdleTimerDisabled = false
             controller.close()
             if let originalBrightness { ScreenBrightness.value = originalBrightness }
             OrientationController.setLandscape(false)
             coordinator.didClose()
-            Task { await session.refreshMe() }
+            if NetworkMonitor.shared.isOnline {
+                Task { await session.refreshMe() }
+            }
         }
         .onChange(of: preloadOnWiFi) { _ in controller.refreshBuffer() }
         .onChange(of: controller.isPlaying) { playing in

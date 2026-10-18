@@ -5,13 +5,14 @@ import SwiftUI
 struct OfflineLibraryView: View {
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var player: PlayerCoordinator
+    @EnvironmentObject private var network: NetworkMonitor
     @ObservedObject private var offline = OfflineDownloadManager.shared
 
     var body: some View {
         Group {
             if !session.isLoggedIn {
                 LoginPrompt(icon: "arrow.down.circle", message: "Inicia sesión con Premium para descargar y ver sin conexión.")
-            } else if !(session.subscription?.premium == true) {
+            } else if !(session.subscription?.premium == true) && offline.readyCount == 0 {
                 VStack(spacing: 16) {
                     EmptyStateView(
                         icon: "crown",
@@ -35,33 +36,58 @@ struct OfflineLibraryView: View {
             } else {
                 List {
                     Section {
-                        Text("Películas \(offline.movieCount)/\(OfflineDownloadManager.maxMovies) · Episodios \(offline.episodeCount)/\(OfflineDownloadManager.maxEpisodes)")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(Theme.muted)
+                        offlineHeader
                             .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
                     }
-                    ForEach(offline.items) { item in
-                        OfflineRow(item: item) {
-                            play(item)
-                        } onRemove: {
-                            offline.remove(item.id)
-                        } onCancel: {
-                            offline.cancel(item.id)
-                        } onRetry: {
-                            Task {
-                                await offline.enqueue(
-                                    titleId: item.titleId,
-                                    episodeId: item.episodeId,
-                                    displayTitle: item.displayTitle,
-                                    subtitle: item.subtitle,
-                                    poster: item.posterURL.flatMap(URL.init(string:)),
-                                    isEpisode: item.isEpisode,
-                                    premium: session.subscription?.premium == true,
-                                    loggedIn: session.isLoggedIn
-                                )
+
+                    Section {
+                        Toggle(isOn: Binding(
+                            get: { offline.wifiOnly },
+                            set: { offline.wifiOnly = $0 }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Solo Wi‑Fi")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(Theme.text)
+                                Text(network.isWiFi ? "Conectado a Wi‑Fi" : "Ahora en datos móviles")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Theme.muted)
                             }
                         }
+                        .tint(Theme.accent2)
                         .listRowBackground(Theme.surface)
+                    } footer: {
+                        Text("Las descargas Premium continúan en segundo plano. El contenido no se guarda en Fotos.")
+                            .font(.system(size: 12))
+                    }
+
+                    Section {
+                        ForEach(offline.items) { item in
+                            OfflineRow(item: item) {
+                                play(item)
+                            } onRemove: {
+                                offline.remove(item.id)
+                            } onCancel: {
+                                offline.cancel(item.id)
+                            } onRetry: {
+                                Task {
+                                    await offline.enqueue(
+                                        titleId: item.titleId,
+                                        episodeId: item.episodeId,
+                                        displayTitle: item.displayTitle,
+                                        subtitle: item.subtitle,
+                                        poster: item.posterURL.flatMap(URL.init(string:)),
+                                        isEpisode: item.isEpisode,
+                                        premium: session.subscription?.premium == true,
+                                        loggedIn: session.isLoggedIn
+                                    )
+                                }
+                            }
+                            .listRowBackground(Theme.surface)
+                        }
+                    } header: {
+                        Text("Tu biblioteca")
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -71,6 +97,53 @@ struct OfflineLibraryView: View {
         .screenBackground()
         .navigationTitle("Ver sin conexión")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { offline.pruneOrphans() }
+    }
+
+    private var offlineHeader: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: network.isOnline ? "arrow.down.circle.fill" : "wifi.slash")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(Theme.premiumGradient)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(network.isOnline ? "Listo para descargar" : "Modo sin conexión")
+                        .font(.system(size: 16, weight: .heavy))
+                        .foregroundColor(Theme.text)
+                    Text("\(offline.readyCount) listos · \(ByteCountFormatter.string(fromByteCount: offline.usedBytes, countStyle: .file)) usados")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(Theme.muted)
+                }
+                Spacer()
+            }
+            HStack(spacing: 8) {
+                quotaChip("Películas", offline.movieCount, OfflineDownloadManager.maxMovies)
+                quotaChip("Episodios", offline.episodeCount, OfflineDownloadManager.maxEpisodes)
+            }
+        }
+        .padding(16)
+        .background(
+            LinearGradient(
+                colors: [Theme.surface, Theme.surface2.opacity(0.9)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Theme.premium.opacity(0.25), lineWidth: 1)
+        )
+        .padding(.horizontal, Theme.gutter)
+    }
+
+    private func quotaChip(_ label: String, _ used: Int, _ max: Int) -> some View {
+        Text("\(label) \(used)/\(max)")
+            .font(.system(size: 12, weight: .bold))
+            .foregroundColor(Theme.text)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Theme.bg.opacity(0.55), in: Capsule())
     }
 
     private func play(_ item: OfflineItem) {
@@ -132,12 +205,17 @@ private struct OfflineRow: View {
                         .font(.system(size: 14, weight: .bold))
                         .foregroundColor(.white)
                         .frame(width: 40, height: 40)
-                        .background(Theme.accent, in: Circle())
+                        .background(Theme.gradient, in: Circle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Reproducir sin conexión")
             }
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if item.state == .ready { onPlay() }
+        }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             if item.state == .downloading || item.state == .queued {
                 Button("Cancelar", role: .destructive, action: onCancel)
@@ -199,6 +277,7 @@ private struct OfflineRow: View {
 
 struct OfflineDownloadButton: View {
     @EnvironmentObject private var session: SessionStore
+    @EnvironmentObject private var player: PlayerCoordinator
     @ObservedObject private var offline = OfflineDownloadManager.shared
 
     let titleId: String
@@ -236,7 +315,7 @@ struct OfflineDownloadButton: View {
 
     private var iconName: String {
         switch item?.state {
-        case .ready: return "checkmark.circle.fill"
+        case .ready: return "play.circle.fill"
         case .downloading, .queued: return "arrow.down.circle"
         case .failed: return "exclamationmark.arrow.circlepath"
         case .none: return "arrow.down.circle"
@@ -245,7 +324,7 @@ struct OfflineDownloadButton: View {
 
     private var labelText: String {
         switch item?.state {
-        case .ready: return "Descargado"
+        case .ready: return "Reproducir sin conexión"
         case .downloading: return "Descargando \(Int((item?.progress ?? 0) * 100))%"
         case .queued: return "En cola…"
         case .failed: return "Reintentar"
@@ -273,8 +352,17 @@ struct OfflineDownloadButton: View {
     }
 
     private func tap() {
+        if item?.state == .ready, let url = item?.localFileURL {
+            player.play(
+                titleId: titleId,
+                episodeId: episodeId,
+                title: displayTitle,
+                localFileURL: url,
+                isMatroska: item?.isMatroska ?? false
+            )
+            return
+        }
         guard session.requireLogin() else { return }
-        if item?.state == .ready { return }
         if item?.state == .failed {
             offline.remove(item!.id)
         }

@@ -600,9 +600,8 @@ final class PlayerController: NSObject, ObservableObject {
         center.publisher(for: UIApplication.didBecomeActiveNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                // Al volver a la app iOS puede haber restablecido el apagado automático de la pantalla.
-                guard let self, !self.closed, self.isPlaying || self.isBuffering else { return }
-                UIApplication.shared.isIdleTimerDisabled = false
+                // iOS a veces reactiva el apagado automático al volver a primer plano.
+                guard let self, !self.closed else { return }
                 self.keepScreenAwake(true)
             }
             .store(in: &bag)
@@ -1112,8 +1111,8 @@ final class PlayerController: NSObject, ObservableObject {
 
     // MARK: Pantalla encendida
 
-    /// La pantalla no se apaga mientras se reproduce o carga una película o un episodio.
-    /// En pausa se mantiene encendida unos minutos más y después iOS puede apagarla.
+    /// Mientras el reproductor está abierto (película o episodio), la pantalla no se apaga:
+    /// ni en reproducción, ni en buffer, ni en pausa. Solo al cerrar o al terminar.
     private func keepScreenAwake(_ awake: Bool) {
         idleTask?.cancel()
         idleTask = nil
@@ -1122,11 +1121,8 @@ final class PlayerController: NSObject, ObservableObject {
             UIApplication.shared.isIdleTimerDisabled = true
             return
         }
-        idleTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 180_000_000_000)
-            guard !Task.isCancelled, let controller = self, !controller.isPlaying, !controller.isBuffering else { return }
-            UIApplication.shared.isIdleTimerDisabled = false
-        }
+        // Pausar no apaga la pantalla: el usuario sigue en la sesión de visionado.
+        UIApplication.shared.isIdleTimerDisabled = true
     }
 
     private func allowScreenSleep() {

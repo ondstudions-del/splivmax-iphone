@@ -75,6 +75,7 @@ enum OfflineDownloadError: LocalizedError {
     case alreadyExists
     case noProgressiveSource
     case notLoggedIn
+    case wifiRequired
     case playback(String)
 
     var errorDescription: String? {
@@ -91,6 +92,8 @@ enum OfflineDownloadError: LocalizedError {
             return "Este título solo está disponible en streaming y no se puede descargar."
         case .notLoggedIn:
             return "Inicia sesión para descargar contenido."
+        case .wifiRequired:
+            return "Activa Wi‑Fi o desactiva «Solo Wi‑Fi» en Ver sin conexión para descargar con datos."
         case .playback(let message):
             return message
         }
@@ -105,11 +108,21 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
     static let maxMovies = 5
     static let maxEpisodes = 5
     static let sessionIdentifier = "com.ond.splivmax.offline.downloads"
+    static let wifiOnlyKey = "spx.offline.wifiOnly"
 
     @Published private(set) var items: [OfflineItem] = []
 
     /// Callback opcional para mostrar toasts (lo enlaza la app con SessionStore).
     var onMessage: ((String, Bool) -> Void)?
+
+    /// Preferir descargas solo por Wi‑Fi (Premium).
+    var wifiOnly: Bool {
+        get { UserDefaults.standard.object(forKey: Self.wifiOnlyKey) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.wifiOnlyKey)
+            objectWillChange.send()
+        }
+    }
 
     private var session: URLSession!
     private var backgroundCompletion: (() -> Void)?
@@ -133,6 +146,23 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
         config.httpMaximumConnectionsPerHost = 2
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
+
+    /// Espacio ocupado por descargas listas o en curso.
+    var usedBytes: Int64 {
+        items.reduce(0) { partial, item in
+            if item.bytesExpected > 0, item.state == .downloading || item.state == .queued {
+                return partial + item.bytesWritten
+            }
+            if let url = item.localFileURL,
+               let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? NSNumber {
+                return partial + size.int64Value
+            }
+            return partial + max(0, item.bytesWritten)
+        }
+    }
+
+    var readyCount: Int { items.filter { $0.state == .ready && $0.localFileURL != nil }.count }
 
     // MARK: Consultas
 
@@ -169,6 +199,9 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
         do {
             guard loggedIn else { throw OfflineDownloadError.notLoggedIn }
             guard premium else { throw OfflineDownloadError.notPremium }
+            if wifiOnly && !NetworkMonitor.shared.isWiFi {
+                throw OfflineDownloadError.wifiRequired
+            }
             let id = OfflineItem.makeId(titleId: titleId, episodeId: episodeId)
             if let existing = items.first(where: { $0.id == id }), existing.state != .failed {
                 throw OfflineDownloadError.alreadyExists
@@ -208,13 +241,17 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
             items.insert(item, at: 0)
             persist()
 
-            let task = session.downloadTask(with: source.url)
+            var request = URLRequest(url: source.url)
+            request.timeoutInterval = 120
+            let task = session.downloadTask(with: request)
             task.taskDescription = id
+            task.priority = URLSessionTask.highPriority
             item.taskIdentifier = task.taskIdentifier
             item.state = .downloading
             upsert(item)
             task.resume()
-            notify("Descarga iniciada. Puede continuar en segundo plano.", error: false)
+            let quality = source.label.isEmpty ? "\(source.quality)p" : source.label
+            notify("Descargando \(quality). Puede continuar en segundo plano.", error: false)
         } catch let e as OfflineDownloadError {
             notify(e.localizedDescription, error: true)
         } catch {
@@ -299,11 +336,21 @@ final class OfflineDownloadManager: NSObject, ObservableObject {
         persist()
     }
 
-    /// Prefiere MP4/MKV progresivo; HLS no se descarga (requiere AVAssetDownloadSession).
+    /// Prefiere MP4 progresivo de mejor calidad; MKV como respaldo. HLS no se descarga aquí.
     static func bestDownloadSource(_ sources: [PlaybackSource]) -> PlaybackSource? {
         let progressive = sources.filter { !$0.hls }.sorted { $0.quality > $1.quality }
-        let mp4 = progressive.first { !$0.isMatroska }
-        return mp4 ?? progressive.first
+        if let mp4 = progressive.first(where: { !$0.isMatroska }) { return mp4 }
+        return progressive.first
+    }
+
+    /// Elimina archivos huérfanos que ya no están en el índice.
+    func pruneOrphans() {
+        OfflinePaths.ensureDirectories()
+        let known = Set(items.compactMap(\.localFileName))
+        guard let files = try? FileManager.default.contentsOfDirectory(at: OfflinePaths.mediaDirectory, includingPropertiesForKeys: nil) else { return }
+        for url in files where !known.contains(url.lastPathComponent) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     private func finishBackgroundIfNeeded() {

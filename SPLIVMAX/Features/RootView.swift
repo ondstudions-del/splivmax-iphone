@@ -47,7 +47,8 @@ struct RootView: View {
     @EnvironmentObject private var network: NetworkMonitor
     @Environment(\.scenePhase) private var scenePhase
     @State private var splashDone = false
-    @State private var leftApp = false
+    /// Solo true tras salir de verdad a segundo plano (no por Control Center / notificaciones).
+    @State private var leftAppCompletely = false
 
     var body: some View {
         ZStack {
@@ -61,7 +62,12 @@ struct RootView: View {
                     case .profileSetup:
                         ProfileSetupView()
                     case .profileChoice:
-                        ProfilePickerView()
+                        // En offline no forzar el selector: se puede seguir con el perfil actual o ver descargas.
+                        if !network.isOnline, session.profile != nil {
+                            MainTabView()
+                        } else {
+                            ProfilePickerView()
+                        }
                     case .guest, .ready:
                         MainTabView()
                     }
@@ -120,18 +126,30 @@ struct RootView: View {
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .background:
-                leftApp = true
+                // Salida completa (Home / otra app). Inactive (Control Center) no cuenta.
+                leftAppCompletely = true
             case .active:
-                // Al volver tras salir de la app se elige perfil, salvo si el reproductor sigue abierto (PiP, AirPlay).
-                if leftApp && player.request == nil { session.askWhoIsWatching() }
-                leftApp = false
-                if session.isLoggedIn { Task { await session.refreshMe() } }
+                // Perfiles solo al volver tras salir del todo — nunca en offline ni con el reproductor abierto.
+                if leftAppCompletely, player.request == nil, network.isOnline {
+                    session.askWhoIsWatching()
+                }
+                leftAppCompletely = false
+                if session.isLoggedIn, network.isOnline {
+                    Task { await session.refreshMe() }
+                }
             default:
                 break
             }
         }
         .onChange(of: network.isOnline) { online in
-            if online, session.isLoggedIn { Task { await session.refreshMe() } }
+            if !online {
+                // Entrar en offline: no interrumpir con el selector de perfiles.
+                if session.profile != nil, session.phase == .profileChoice {
+                    session.forceReadyWithCurrentProfile()
+                }
+            } else if session.isLoggedIn {
+                Task { await session.refreshMe() }
+            }
         }
     }
 }

@@ -123,55 +123,112 @@ struct ProfileSetupView: View {
 
 struct ProfilePickerView: View {
     @EnvironmentObject private var session: SessionStore
+    @EnvironmentObject private var network: NetworkMonitor
     @State private var pinFor: Profile?
     @State private var busy: String?
     @State private var error: String?
+    @State private var appeared = false
 
-    private let columns = [GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 22)]
+    private let columns = [GridItem(.adaptive(minimum: 118, maximum: 150), spacing: 20)]
 
     var body: some View {
         ZStack {
+            // Fondo con atmósfera (sin cards genéricas)
             Theme.bg.ignoresSafeArea()
-            RadialGradient(colors: [Theme.accent.opacity(0.22), .clear], center: .top, startRadius: 10, endRadius: 460)
-                .ignoresSafeArea()
+            LinearGradient(
+                colors: [Color(hex: 0x12183A), Theme.bg, Color(hex: 0x0A1228)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+            Circle()
+                .fill(Theme.accent.opacity(0.28))
+                .frame(width: 320, height: 320)
+                .blur(radius: 80)
+                .offset(x: -120, y: -220)
+            Circle()
+                .fill(Theme.accent2.opacity(0.18))
+                .frame(width: 280, height: 280)
+                .blur(radius: 90)
+                .offset(x: 140, y: 320)
 
-            ScrollView {
-                VStack(spacing: 28) {
-                    LogoTitle(size: 28).padding(.top, 24)
-                    Text("¿Quién está viendo?")
-                        .font(.system(size: 28, weight: .heavy))
-                        .foregroundColor(Theme.text)
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    VStack(spacing: 10) {
+                        Image("LogoMark")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 56, height: 56)
+                            .shadow(color: Theme.accent.opacity(0.45), radius: 18, y: 6)
+                            .padding(.top, 36)
+
+                        Text("¿Quién está viendo?")
+                            .font(.system(size: 30, weight: .heavy, design: .rounded))
+                            .foregroundColor(Theme.text)
+                            .multilineTextAlignment(.center)
+
+                        Text(network.isOnline
+                             ? "Elige un perfil para personalizar tu catálogo."
+                             : "Sin conexión: elige un perfil o entra a Ver sin conexión.")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(Theme.text2)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 28)
+                    }
+                    .opacity(appeared ? 1 : 0)
+                    .offset(y: appeared ? 0 : 12)
 
                     if session.profilesData == nil {
-                        ProgressView().tint(Theme.accent2).padding(40)
-                    }
-
-                    LazyVGrid(columns: columns, spacing: 26) {
-                        ForEach(session.profiles) { profile in
-                            Button { choose(profile) } label: {
-                                ProfileTile(profile: profile, busy: busy == profile.id)
+                        ProgressView()
+                            .tint(Theme.accent2)
+                            .padding(.top, 48)
+                    } else {
+                        LazyVGrid(columns: columns, spacing: 28) {
+                            ForEach(Array(session.profiles.enumerated()), id: \.element.id) { index, profile in
+                                Button { choose(profile) } label: {
+                                    ProfileTile(profile: profile, busy: busy == profile.id, highlighted: true)
+                                }
+                                .buttonStyle(PressableStyle())
+                                .disabled(busy != nil || !profile.available)
+                                .opacity(appeared ? 1 : 0)
+                                .offset(y: appeared ? 0 : 24)
+                                .animation(
+                                    .spring(response: 0.55, dampingFraction: 0.82).delay(0.05 * Double(index)),
+                                    value: appeared
+                                )
                             }
-                            .buttonStyle(PressableStyle())
-                            .disabled(busy != nil || !profile.available)
                         }
+                        .padding(.horizontal, 28)
+                        .padding(.top, 36)
                     }
-                    .padding(.horizontal, 24)
 
-                    if let error { InlineError(message: error).padding(.horizontal, 24) }
+                    if let error {
+                        InlineError(message: error)
+                            .padding(.horizontal, 28)
+                            .padding(.top, 20)
+                    }
 
-                    HStack(spacing: 18) {
+                    VStack(spacing: 14) {
                         if session.profile != nil && !session.profileChoiceRequired {
-                            Button("Cancelar") { session.cancelProfileChoice() }
+                            Button("Seguir con \(session.profile?.name ?? "este perfil")") {
+                                session.cancelProfileChoice()
+                            }
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(Theme.accent2)
                         }
                         Button("Cerrar sesión") { Task { await session.logout() } }
+                            .font(.system(size: 14.5, weight: .semibold))
+                            .foregroundColor(Theme.muted)
                     }
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.muted)
-                    .padding(.bottom, 30)
+                    .padding(.top, 36)
+                    .padding(.bottom, 40)
                 }
             }
         }
-        .task { if session.profilesData == nil { await session.loadProfiles() } }
+        .task {
+            if session.profilesData == nil { await session.loadProfiles() }
+            withAnimation(.easeOut(duration: 0.45)) { appeared = true }
+        }
         .sheet(item: $pinFor) { profile in
             PinSheet(title: "PIN de \(profile.name)", message: "Este perfil está protegido. Escribe su PIN de 4 dígitos.") { pin in
                 try await session.select(profile: profile.id, pin: pin)
@@ -193,6 +250,13 @@ struct ProfilePickerView: View {
                 Haptics.success()
             } catch let e as APIError where e.code == "pin_required" {
                 pinFor = profile
+            } catch let e as APIError where e.isOffline {
+                // Sin red: si ya es el perfil activo, entrar; si no, avisar.
+                if session.profile?.id == profile.id {
+                    session.forceReadyWithCurrentProfile()
+                } else {
+                    self.error = "Sin conexión. Usa el perfil actual o Ver sin conexión."
+                }
             } catch {
                 self.error = APIError.from(error).message
             }
@@ -204,38 +268,74 @@ struct ProfilePickerView: View {
 struct ProfileTile: View {
     let profile: Profile
     var busy = false
+    var highlighted = false
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             ZStack {
-                AvatarView(url: profile.avatarUrl, size: 112, name: profile.name)
+                if highlighted {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [Theme.accent.opacity(0.35), Theme.accent2.opacity(0.15)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 118, height: 118)
+                        .blur(radius: 2)
+                }
+                AvatarView(url: profile.avatarUrl, size: 104, name: profile.name)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [Theme.accent2.opacity(0.7), Theme.accent.opacity(0.35), .clear],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 2
+                            )
+                    )
+                    .shadow(color: Theme.accent.opacity(0.25), radius: 16, y: 8)
+
                 if busy {
-                    Color.black.opacity(0.45).clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(Color.black.opacity(0.5))
+                        .frame(width: 104, height: 104)
                     ProgressView().tint(.white)
                 }
             }
-            .frame(width: 112, height: 112)
+            .frame(width: 118, height: 118)
             .overlay(alignment: .bottomTrailing) {
                 if profile.locked {
                     Image(systemName: "lock.fill")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.white)
-                        .padding(6)
-                        .background(Theme.surface3, in: Circle())
-                        .offset(x: 4, y: 4)
+                        .padding(7)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(Theme.line, lineWidth: 1))
+                        .offset(x: 2, y: 2)
                 }
             }
             .opacity(profile.available ? 1 : 0.4)
 
-            VStack(spacing: 3) {
+            VStack(spacing: 4) {
                 Text(profile.name)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundColor(Theme.text)
                     .lineLimit(1)
                 if profile.kids {
-                    Text("Infantil").font(.system(size: 11.5, weight: .bold)).foregroundColor(Theme.accent2)
+                    Text("Infantil")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Theme.accent2)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Theme.accent2.opacity(0.12), in: Capsule())
                 } else if !profile.available {
-                    Text("En pausa").font(.system(size: 11.5, weight: .bold)).foregroundColor(Theme.warn)
+                    Text("En pausa")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .foregroundColor(Theme.warn)
                 }
             }
         }
