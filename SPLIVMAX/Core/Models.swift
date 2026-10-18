@@ -943,7 +943,7 @@ struct PlaybackSource: Decodable, Hashable {
         let raw = (try? c.decode(String.self, forKey: .url))
             ?? (try? c.decode(String.self, forKey: .src))
             ?? ""
-        guard let parsed = URL(string: raw), parsed.scheme != nil else {
+        guard let parsed = Self.absStreamURL(raw) else {
             throw DecodingError.dataCorruptedError(forKey: .url, in: c, debugDescription: "URL de fuente inválida")
         }
         url = parsed
@@ -953,6 +953,14 @@ struct PlaybackSource: Decodable, Hashable {
             || parsed.pathExtension.lowercased() == "m3u8"
         quality = c.flexInt(.quality) ?? 720
         label = (try? c.decode(String.self, forKey: .label)) ?? "\(quality)p"
+    }
+
+    private static func absStreamURL(_ raw: String) -> URL? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if let u = URL(string: s), u.scheme != nil { return u }
+        let path = s.hasPrefix("/") ? s : "/" + s
+        return URL(string: "https://splivmax.ond-s.com" + path)
     }
 }
 

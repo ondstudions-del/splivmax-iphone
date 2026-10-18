@@ -181,7 +181,9 @@ struct PlayerView: View {
 
     private var loadingStatus: String {
         if controller.waitingForNetwork { return "Sin conexión" }
-        return controller.data == nil ? "Conectando…" : "Cargando…"
+        if controller.data == nil { return "Conectando…" }
+        if controller.isBuffering { return "Preparando vídeo…" }
+        return "Cargando…"
     }
 
     // MARK: Gestos

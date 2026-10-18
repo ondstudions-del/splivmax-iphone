@@ -90,13 +90,22 @@ final class APIClient: @unchecked Sendable {
     }
 
     func send<T: Decodable>(_ method: Method = .get, _ path: String, query: [String: String] = [:],
-                            body: [String: Any]? = nil, authorized: Bool = true, as type: T.Type = T.self) async throws -> T {
-        try await sendPage(method, path, query: query, body: body, authorized: authorized, as: type).data
+                            body: [String: Any]? = nil, authorized: Bool = true,
+                            timeout: TimeInterval? = nil,
+                            as type: T.Type = T.self) async throws -> T {
+        try await sendPage(method, path, query: query, body: body, authorized: authorized, timeout: timeout, as: type).data
     }
 
     func sendPage<T: Decodable>(_ method: Method = .get, _ path: String, query: [String: String] = [:],
-                                body: [String: Any]? = nil, authorized: Bool = true, as type: T.Type = T.self) async throws -> (data: T, meta: PageMeta?) {
-        let request = try makeRequest(method, path, query: query, body: body, authorized: authorized)
+                                body: [String: Any]? = nil, authorized: Bool = true,
+                                timeout: TimeInterval? = nil,
+                                as type: T.Type = T.self) async throws -> (data: T, meta: PageMeta?) {
+        var request = try makeRequest(method, path, query: query, body: body, authorized: authorized)
+        if let timeout {
+            request.timeoutInterval = timeout
+        }
+        // Playback y arranques: 1 reintento rápido; resto: hasta 2.
+        let maxAttempts = path.hasPrefix("/playback/") ? 2 : 3
         var attempt = 0
         while true {
             do {
@@ -110,8 +119,9 @@ final class APIClient: @unchecked Sendable {
                 throw CancellationError()
             } catch {
                 attempt += 1
-                if method == .get, attempt < 3, Self.isTransient(error) {
-                    try await Task.sleep(nanoseconds: UInt64(attempt) * 600_000_000)
+                if method == .get, attempt < maxAttempts, Self.isTransient(error) {
+                    let delay = path.hasPrefix("/playback/") ? 350_000_000 : UInt64(attempt) * 600_000_000
+                    try await Task.sleep(nanoseconds: delay)
                     continue
                 }
                 throw APIError.from(error)
