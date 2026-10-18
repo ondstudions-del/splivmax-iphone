@@ -26,7 +26,7 @@ final class SessionStore: ObservableObject {
     @Published var authMode: AuthMode = .login
     @Published var toast: Toast?
     @Published var maintenanceMessage: String?
-    /// La elección de perfil es obligatoria (al abrir la app o al volver a ella): sin botón «Cancelar».
+    /// La elección de perfil es obligatoria al abrir la app: sin botón «Cancelar».
     @Published private(set) var profileChoiceRequired = false
     /// Cambia al entrar, salir o cambiar de perfil: las pantallas recargan su contenido.
     @Published private(set) var contentVersion = 0
@@ -36,6 +36,7 @@ final class SessionStore: ObservableObject {
     private var bag = Set<AnyCancellable>()
     private static let meCacheKey = "spx.me.v1"
     private static let chooseProfileKey = "spx.profiles.choose"
+    private static let favoritesKeyPrefix = "spx.favorites."
 
     init() {
         NotificationCenter.default.publisher(for: .apiSessionEvent)
@@ -59,16 +60,15 @@ final class SessionStore: ObservableObject {
             api.token = token
             if let cached = Self.cachedMe() {
                 apply(me: cached)
+                loadFavoriteCache()
                 phase = .ready
-                // No pedir perfil aquí: el selector solo aparece al salir por completo de la app
-                // (o si aún no hay perfil activo).
             }
             await refreshMe()
             if phase == .launching {
                 phase = user == nil ? .guest : .ready
             }
-            // Primer acceso / sin perfil: hay que elegir. Con perfil cacheado se entra directo.
-            if phase == .ready, profile == nil {
+            // Al cerrar y volver a abrir la app: pedir perfil (no al salir a segundo plano).
+            if phase == .ready, isLoggedIn {
                 askWhoIsWatching()
             }
         } else {
@@ -94,6 +94,7 @@ final class SessionStore: ObservableObject {
             apply(me: me)
             Self.storeMe(me)
             await loadProfiles()
+            await syncFavoritesFromServer()
             if profilesData?.setupPending == true {
                 phase = .profileSetup
             } else if me.profile == nil && profile == nil {
@@ -167,6 +168,7 @@ final class SessionStore: ObservableObject {
         favoriteOverrides = [:]
         self.user = user
         profile = session.profile
+        loadFavoriteCache()
         loginPresented = false
         if session.profileSetup == true {
             phase = .profileSetup
@@ -233,11 +235,9 @@ final class SessionStore: ObservableObject {
         return UserDefaults.standard.bool(forKey: Self.chooseProfileKey)
     }
 
-    /// Selector de perfiles: solo tras salir por completo de la app (o si no hay perfil activo).
-    /// No se usa al perder la red ni en cada arranque con perfil ya elegido.
+    /// Selector de perfiles al abrir la app (cerrar y volver a entrar), no al salir a segundo plano.
     func askWhoIsWatching() {
-        guard isLoggedIn, phase == .ready else { return }
-        // Sin internet: no interrumpir; el perfil actual y Offline siguen disponibles.
+        guard isLoggedIn, phase == .ready || phase == .profileChoice else { return }
         if !NetworkMonitor.shared.isOnline {
             return
         }
@@ -245,7 +245,7 @@ final class SessionStore: ObservableObject {
             profileChoiceRequired = true
             phase = .profileChoice
             Task { await loadProfiles() }
-        } else {
+        } else if profilesData == nil {
             Task {
                 await loadProfiles()
                 guard phase == .ready, NetworkMonitor.shared.isOnline, profilesNeedChoice else { return }
@@ -268,13 +268,12 @@ final class SessionStore: ObservableObject {
         if let pin, !pin.isEmpty { body["pin"] = pin }
         let r: ProfileResponse = try await api.send(.post, "/profiles/\(id)/select", body: body)
         api.clearCache()
-        favoriteOverrides = [:]
         profile = r.profile
+        loadFavoriteCache()
         profileChoiceRequired = false
         phase = .ready
         contentVersion += 1
         await refreshMe()
-        // Por si /me llega sin perfil o hay carrera con eventos de API: mantener la elección.
         if profile != nil {
             profileChoiceRequired = false
             if phase == .profileChoice { phase = .ready }
@@ -329,23 +328,66 @@ final class SessionStore: ObservableObject {
 
     // MARK: Mi lista
 
-    func isFavorite(_ id: String, fallback: Bool) -> Bool {
+    func isFavorite(_ id: String, fallback: Bool = false) -> Bool {
         favoriteOverrides[id] ?? fallback
     }
 
     func toggleFavorite(_ id: String, current: Bool) async {
         guard requireLogin() else { return }
         let wanted = !current
-        favoriteOverrides[id] = wanted
+        setFavoriteOverride(id, wanted)
         Haptics.tap()
         do {
             let r: FavoriteResponse = try await api.send(.post, "/my-list/\(id)", body: ["favorite": wanted])
-            favoriteOverrides[id] = r.favorite
+            setFavoriteOverride(id, r.favorite)
             show(r.favorite ? "Añadido a Mi lista" : "Quitado de Mi lista", .success)
         } catch {
-            favoriteOverrides[id] = current
+            setFavoriteOverride(id, current)
             show(APIError.from(error).message, .error)
         }
+    }
+
+    private func setFavoriteOverride(_ id: String, _ value: Bool) {
+        var map = favoriteOverrides
+        map[id] = value
+        favoriteOverrides = map
+        persistFavoriteCache()
+    }
+
+    private func favoritesStorageKey() -> String? {
+        guard let pid = profile?.id ?? user?.id else { return nil }
+        return Self.favoritesKeyPrefix + pid
+    }
+
+    private func loadFavoriteCache() {
+        guard let key = favoritesStorageKey(),
+              let ids = UserDefaults.standard.array(forKey: key) as? [String] else { return }
+        var map = favoriteOverrides
+        for id in ids { map[id] = true }
+        // Reasignar para notificar a SwiftUI.
+        favoriteOverrides = map
+        objectWillChange.send()
+    }
+
+    private func persistFavoriteCache() {
+        guard let key = favoritesStorageKey() else { return }
+        let ids = favoriteOverrides.compactMap { $0.value ? $0.key : nil }.sorted()
+        UserDefaults.standard.set(ids, forKey: key)
+    }
+
+    func replaceFavorites(ids: [String]) {
+        var map: [String: Bool] = [:]
+        for id in ids { map[id] = true }
+        favoriteOverrides = map
+        persistFavoriteCache()
+    }
+
+    private func syncFavoritesFromServer() async {
+        guard api.token != nil else { return }
+        do {
+            let items: [TitleCard] = try await api.send(.get, "/my-list")
+            replaceFavorites(ids: items.map(\.id))
+        } catch {}
     }
 
     // MARK: Avisos

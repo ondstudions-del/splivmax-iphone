@@ -62,6 +62,7 @@ final class CatalogModel: ObservableObject {
             pages = result.meta?.pages ?? 1
             total = result.meta?.total ?? items.count
             error = nil
+            ImagePipeline.shared.prefetch(result.data.prefix(18).compactMap(\.tallImage), maxPixel: 360)
         } catch is CancellationError {
         } catch {
             guard gen == generation else { return }

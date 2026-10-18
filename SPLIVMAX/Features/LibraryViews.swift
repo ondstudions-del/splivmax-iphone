@@ -41,6 +41,8 @@ struct MyListView: View {
         guard session.isLoggedIn else { return }
         do {
             items = try await APIClient.shared.send(.get, "/my-list")
+            session.replaceFavorites(ids: items.map(\.id))
+            ImagePipeline.shared.prefetch(items.prefix(24).compactMap(\.tallImage), maxPixel: 360)
             error = nil
         } catch {
             self.error = APIError.from(error)

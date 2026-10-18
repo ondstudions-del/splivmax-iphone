@@ -316,10 +316,12 @@ struct TitleDetailView: View {
         if let offline = OfflineDownloadManager.shared.item(titleId: card.id, episodeId: episodeId),
            offline.state == .ready, let url = offline.localFileURL {
             player.play(titleId: card.id, episodeId: episodeId, title: card.title,
+                        artworkURL: card.wideImage ?? card.tallImage,
                         localFileURL: url, isMatroska: offline.isMatroska)
             return
         }
-        player.play(titleId: card.id, episodeId: episodeId, title: card.title)
+        player.play(titleId: card.id, episodeId: episodeId, title: card.title,
+                    artworkURL: card.wideImage ?? card.tallImage)
     }
 
     @ViewBuilder

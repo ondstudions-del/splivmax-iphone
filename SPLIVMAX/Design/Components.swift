@@ -74,16 +74,17 @@ struct PosterCard: View {
     var showTitle = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             poster
                 .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).stroke(Color.white.opacity(0.06), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
                 .overlay(alignment: .topLeading) {
                     HStack(spacing: 4) {
                         if title.isPremium { PremiumBadge(small: true) }
                         if title.isUpcoming { SoonBadge() }
                     }
-                    .padding(5)
+                    .padding(6)
                 }
             if showTitle {
                 Text(title.title)
@@ -273,17 +274,19 @@ struct WhiteButtonStyle: ButtonStyle {
 /// Botón translúcido (.btn--glass).
 struct GlassButtonStyle: ButtonStyle {
     var fullWidth = false
+    /// Resalta en cian (p. ej. «guardado» en Mi lista).
+    var accent = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 15, weight: .semibold))
-            .foregroundColor(.white)
+            .foregroundColor(accent ? Theme.accent2 : .white)
             .frame(maxWidth: fullWidth ? .infinity : nil)
             .padding(.vertical, 13)
             .padding(.horizontal, 14)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.25), lineWidth: 1))
+            .background((accent ? Theme.accent2.opacity(0.16) : Color.white.opacity(0.08)), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(accent ? Theme.accent2.opacity(0.55) : Color.white.opacity(0.25), lineWidth: 1))
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .modifier(EnabledOpacity())
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
@@ -560,7 +563,24 @@ extension View {
     }
 
     func screenBackground() -> some View {
-        self.background(Theme.bg.ignoresSafeArea())
+        self.background {
+            ZStack {
+                Theme.bg
+                RadialGradient(
+                    colors: [Theme.accent.opacity(0.12), .clear],
+                    center: UnitPoint(x: 0.15, y: 0),
+                    startRadius: 20,
+                    endRadius: 420
+                )
+                RadialGradient(
+                    colors: [Theme.accent2.opacity(0.07), .clear],
+                    center: UnitPoint(x: 0.9, y: 0.25),
+                    startRadius: 10,
+                    endRadius: 380
+                )
+            }
+            .ignoresSafeArea()
+        }
     }
 }
 

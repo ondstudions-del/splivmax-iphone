@@ -59,7 +59,7 @@ struct PlayerView: View {
                 if showLoadingScreen {
                     PlayerLoadingView(title: controller.data?.title.title ?? request.title,
                                       subtitle: controller.data?.episode?.label,
-                                      backdrop: controller.data?.title.backdrop,
+                                      backdrop: controller.data?.title.backdrop ?? request.artworkURL,
                                       status: loadingStatus,
                                       offline: controller.waitingForNetwork,
                                       bitsPerSecond: controller.throughput)
@@ -686,11 +686,12 @@ private struct PlayerLoadingView: View {
         ZStack {
             Color.black
             if let backdrop {
-                RemoteImage(backdrop, maxPixel: 1200)
-                    .blur(radius: 16)
-                    .opacity(0.4)
+                RemoteImage(backdrop, maxPixel: 1400)
+                    .opacity(0.85)
+                LinearGradient(colors: [.clear, .black.opacity(0.55), .black.opacity(0.92)], startPoint: .top, endPoint: .bottom)
+            } else {
+                LinearGradient(colors: [Color.black.opacity(0.35), Color.black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
             }
-            LinearGradient(colors: [Color.black.opacity(0.35), Color.black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
 
             VStack(spacing: 18) {
                 ZStack {

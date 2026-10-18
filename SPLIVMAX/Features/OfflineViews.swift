@@ -148,10 +148,12 @@ struct OfflineLibraryView: View {
 
     private func play(_ item: OfflineItem) {
         guard let url = item.localFileURL, item.state == .ready else { return }
+        let art = item.posterURL.flatMap(URL.init(string:))
         player.play(
             titleId: item.titleId,
             episodeId: item.episodeId,
             title: item.displayTitle,
+            artworkURL: art,
             localFileURL: url,
             isMatroska: item.isMatroska
         )

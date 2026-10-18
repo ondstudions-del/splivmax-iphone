@@ -9,6 +9,8 @@ struct PlayRequest: Identifiable, Equatable {
     let titleId: String
     var episodeId: String?
     let title: String
+    /// Imagen de portada mientras carga el stream.
+    var artworkURL: URL? = nil
     /// Archivo local (Ver sin conexión). No se usa la API de streaming.
     var localFileURL: URL? = nil
     var isMatroska: Bool = false
@@ -25,11 +27,13 @@ final class PlayerCoordinator: ObservableObject {
     @Published private(set) var closedCount = 0
 
     func play(titleId: String, episodeId: String? = nil, title: String,
+              artworkURL: URL? = nil,
               localFileURL: URL? = nil, isMatroska: Bool = false) {
         request = PlayRequest(
             titleId: titleId,
             episodeId: episodeId,
             title: title,
+            artworkURL: artworkURL,
             localFileURL: localFileURL,
             isMatroska: isMatroska
         )

@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 @MainActor
 final class HomeModel: ObservableObject {
@@ -16,13 +17,31 @@ final class HomeModel: ObservableObject {
             data = home
             error = nil
             loadedVersion = version
-            let posters = home.sections.prefix(2).flatMap { $0.items.prefix(6) }.compactMap(\.tallImage)
-            ImagePipeline.shared.prefetch(posters, maxPixel: 360)
+            prefetchImages(home)
         } catch is CancellationError {
         } catch {
             let e = APIError.from(error)
-            // Los 409 de perfil los resuelve la sesión; no se muestran como error.
             if !["profile_setup", "profile_required"].contains(e.code) { self.error = e }
+        }
+    }
+
+    private func prefetchImages(_ home: HomeData) {
+        var urls: [URL] = []
+        if let hero = home.hero {
+            if let u = hero.card.wideImage { urls.append(u) }
+            if let u = hero.card.tallImage { urls.append(u) }
+        }
+        for item in home.continueItems.prefix(8) {
+            if let u = item.episode?.thumbnail ?? item.title.wideImage { urls.append(u) }
+        }
+        for section in home.sections.prefix(5) {
+            for item in section.items.prefix(10) {
+                if let u = item.tallImage { urls.append(u) }
+            }
+        }
+        ImagePipeline.shared.prefetch(urls, maxPixel: 480)
+        if let heroURL = home.hero?.card.wideImage {
+            Task { _ = await ImagePipeline.shared.load(heroURL, maxPixel: 1100) }
         }
     }
 }
@@ -35,34 +54,39 @@ struct HomeView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
+            LazyVStack(alignment: .leading, spacing: 28) {
                 if let data = model.data {
                     if let hero = data.hero {
                         HeroCard(hero: hero)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     } else {
                         WelcomeCard(openTab: openTab)
                     }
                     if !data.continueItems.isEmpty {
                         ContinueRow(items: data.continueItems)
                     }
-                    ForEach(data.sections) { section in
-                        if let genre = section.genre {
-                            VStack(alignment: .leading, spacing: 0) {
-                                TitleRow(title: section.title, items: section.items)
-                                NavigationLink(value: Route.genre(slug: genre, name: section.title, type: nil)) {
-                                    HStack(spacing: 4) {
-                                        Text("Ver todo")
-                                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold))
+                    ForEach(Array(data.sections.enumerated()), id: \.element.id) { index, section in
+                        Group {
+                            if let genre = section.genre {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    TitleRow(title: section.title, items: section.items)
+                                    NavigationLink(value: Route.genre(slug: genre, name: section.title, type: nil)) {
+                                        HStack(spacing: 4) {
+                                            Text("Ver todo")
+                                            Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold))
+                                        }
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(Theme.accent2)
+                                        .padding(.horizontal, Theme.gutter)
+                                        .padding(.top, 8)
                                     }
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundColor(Theme.accent2)
-                                    .padding(.horizontal, Theme.gutter)
-                                    .padding(.top, 8)
                                 }
+                            } else {
+                                TitleRow(title: section.title, items: section.items)
                             }
-                        } else {
-                            TitleRow(title: section.title, items: section.items)
                         }
+                        .opacity(1)
+                        .animation(.easeOut(duration: 0.35).delay(0.04 * Double(min(index, 6))), value: data.sections.count)
                     }
                     if data.sections.isEmpty && data.hero == nil {
                         EmptyStateView(icon: "film.stack", title: "Muy pronto", message: "Estamos preparando el catálogo. Vuelve en unos minutos.")
@@ -77,7 +101,7 @@ struct HomeView: View {
                 }
             }
             .padding(.top, 4)
-            .padding(.bottom, 24)
+            .padding(.bottom, 28)
         }
         .overlay {
             if let error = model.error, model.data == nil {
@@ -97,7 +121,7 @@ struct HomeView: View {
     }
 }
 
-/// Cabecera de la web móvil: logo a la izquierda, avisos y perfil a la derecha, degradado negro → transparente.
+/// Cabecera de la web móvil: logo a la izquierda, avisos y perfil a la derecha.
 private struct HomeHeader: View {
     @EnvironmentObject private var session: SessionStore
 
@@ -111,6 +135,7 @@ private struct HomeHeader: View {
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(.white)
                         .frame(width: 38, height: 38)
+                        .background(.ultraThinMaterial.opacity(0.35), in: Circle())
                         .overlay(alignment: .topTrailing) {
                             if session.unread > 0 {
                                 Text(session.unread > 9 ? "9+" : "\(session.unread)")
@@ -136,19 +161,20 @@ private struct HomeHeader: View {
         .padding(.horizontal, Theme.gutter + 2)
         .frame(height: 52)
         .background(
-            LinearGradient(colors: [Color.black.opacity(0.85), Color.black.opacity(0.0)], startPoint: .top, endPoint: .bottom)
+            LinearGradient(colors: [Color.black.opacity(0.88), Color.black.opacity(0.0)], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea(edges: .top)
                 .padding(.bottom, -18)
         )
     }
 }
 
-/// Destacado en tarjeta 3:4 (como .hero en móvil).
+/// Destacado: póster/backdrop siempre visible; el vídeo de preview se funde encima al estar listo.
 struct HeroCard: View {
     let hero: HeroItem
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var player: PlayerCoordinator
     @State private var appeared = false
+    @State private var videoReady = false
 
     private var card: TitleCard { hero.card }
 
@@ -158,9 +184,17 @@ struct HeroCard: View {
 
         ZStack(alignment: .bottom) {
             NavigationLink(value: Route.title(card)) {
-                RemoteImage(card.wideImage, maxPixel: 1100)
-                    .scaleEffect(appeared ? 1 : 1.06)
-                    .animation(.easeOut(duration: 1.2), value: appeared)
+                ZStack {
+                    RemoteImage(card.wideImage ?? card.tallImage, maxPixel: 1100)
+                    if let video = hero.heroVideo, let url = video.url {
+                        HeroPreviewPlayer(url: url, isReady: $videoReady)
+                            .opacity(videoReady ? 1 : 0)
+                            .animation(.easeInOut(duration: 0.55), value: videoReady)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .scaleEffect(appeared ? 1 : 1.04)
+                .animation(.easeOut(duration: 1.1), value: appeared)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Text("Ver ficha de \(card.title)"))
@@ -194,15 +228,17 @@ struct HeroCard: View {
                     .disabled(card.isUpcoming || !card.playable)
 
                     if session.isLoggedIn {
-                        let fav = session.isFavorite(card.id, fallback: false)
+                        let fav = session.isFavorite(card.id, fallback: hero.favorite)
                         Button {
                             Task { await session.toggleFavorite(card.id, current: fav) }
                         } label: {
                             Image(systemName: fav ? "checkmark" : "plus")
+                                .font(.system(size: 16, weight: .bold))
                                 .frame(width: 20, height: 20)
                         }
-                        .buttonStyle(GlassButtonStyle())
-                        .accessibilityLabel(Text(fav ? "Quitar de Mi lista" : "Añadir a Mi lista"))
+                        .buttonStyle(GlassButtonStyle(accent: fav))
+                        .accessibilityLabel(Text(fav ? "Guardado en Mi lista" : "Añadir a Mi lista"))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: fav)
                     }
 
                     NavigationLink(value: Route.title(card)) {
@@ -218,12 +254,12 @@ struct HeroCard: View {
             .padding(.bottom, 18)
             .opacity(appeared ? 1 : 0)
             .offset(y: appeared ? 0 : 14)
-            .animation(.easeOut(duration: 0.55).delay(0.1), value: appeared)
+            .animation(.easeOut(duration: 0.55).delay(0.08), value: appeared)
         }
         .frame(width: width, height: height)
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusLarge, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusLarge, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
-        .shadow(color: .black.opacity(0.6), radius: 25, y: 20)
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusLarge, style: .continuous).stroke(Color.white.opacity(0.1), lineWidth: 1))
+        .shadow(color: .black.opacity(0.55), radius: 28, y: 18)
         .padding(.horizontal, Theme.gutter)
         .onAppear { appeared = true }
     }
@@ -252,7 +288,89 @@ struct HeroCard: View {
 
     private func play() {
         guard session.requireLogin() else { return }
-        player.play(titleId: card.id, title: card.title)
+        player.play(titleId: card.id, title: card.title, artworkURL: card.wideImage ?? card.tallImage)
+    }
+}
+
+/// Vídeo silencioso en bucle para el hero; avisa cuando el primer fotograma está listo.
+private struct HeroPreviewPlayer: UIViewRepresentable {
+    let url: URL
+    @Binding var isReady: Bool
+
+    func makeUIView(context: Context) -> HeroPreviewUIView {
+        let view = HeroPreviewUIView()
+        view.onReady = { isReady = true }
+        view.play(url: url)
+        return view
+    }
+
+    func updateUIView(_ uiView: HeroPreviewUIView, context: Context) {
+        if uiView.currentURL != url {
+            isReady = false
+            uiView.onReady = { isReady = true }
+            uiView.play(url: url)
+        }
+    }
+
+    static func dismantleUIView(_ uiView: HeroPreviewUIView, coordinator: ()) {
+        uiView.stop()
+    }
+}
+
+private final class HeroPreviewUIView: UIView {
+    private let playerLayer = AVPlayerLayer()
+    private var player: AVPlayer?
+    private var looper: AVPlayerLooper?
+    private var queue: AVQueuePlayer?
+    private var readyObs: NSKeyValueObservation?
+    var currentURL: URL?
+    var onReady: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        playerLayer.videoGravity = .resizeAspectFill
+        layer.addSublayer(playerLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        playerLayer.frame = bounds
+    }
+
+    func play(url: URL) {
+        stop()
+        currentURL = url
+        let item = AVPlayerItem(url: url)
+        let queue = AVQueuePlayer(playerItem: item)
+        queue.isMuted = true
+        queue.actionAtItemEnd = .none
+        looper = AVPlayerLooper(player: queue, templateItem: item)
+        self.queue = queue
+        player = queue
+        playerLayer.player = queue
+        readyObs = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .readyToPlay else { return }
+            DispatchQueue.main.async {
+                self?.onReady?()
+                queue.play()
+            }
+        }
+        queue.play()
+    }
+
+    func stop() {
+        readyObs = nil
+        looper?.disableLooping()
+        looper = nil
+        queue?.pause()
+        queue?.removeAllItems()
+        queue = nil
+        player = nil
+        playerLayer.player = nil
+        currentURL = nil
     }
 }
 
@@ -286,14 +404,19 @@ struct ContinueRow: View {
     @EnvironmentObject private var session: SessionStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             SectionTitle("Continuar viendo")
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(alignment: .top, spacing: 8) {
+                LazyHStack(alignment: .top, spacing: 10) {
                     ForEach(items) { item in
                         Button {
                             guard session.requireLogin() else { return }
-                            player.play(titleId: item.title.id, episodeId: item.episode?.id, title: item.title.title)
+                            player.play(
+                                titleId: item.title.id,
+                                episodeId: item.episode?.id,
+                                title: item.title.title,
+                                artworkURL: item.episode?.thumbnail ?? item.title.wideImage ?? item.title.tallImage
+                            )
                         } label: {
                             ContinueCard(item: item)
                         }

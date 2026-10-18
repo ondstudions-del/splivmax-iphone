@@ -402,15 +402,28 @@ struct TitleDetail: Decodable {
     }
 }
 
+struct HeroVideo: Decodable, Hashable {
+    let src: String
+    let type: String?
+    let hls: Bool?
+
+    var url: URL? { URL(string: src) }
+}
+
 struct HeroItem: Decodable {
     let card: TitleCard
     let synopsisFull: String
+    let favorite: Bool
+    let heroVideo: HeroVideo?
 
-    enum CodingKeys: String, CodingKey { case synopsisFull }
+    enum CodingKeys: String, CodingKey { case synopsisFull, favorite, heroVideo }
 
     init(from decoder: Decoder) throws {
         card = try TitleCard(from: decoder)
-        synopsisFull = (try? decoder.container(keyedBy: CodingKeys.self).decode(String.self, forKey: .synopsisFull)) ?? ""
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        synopsisFull = (try? c.decode(String.self, forKey: .synopsisFull)) ?? ""
+        favorite = (try? c.decode(Bool.self, forKey: .favorite)) ?? false
+        heroVideo = try? c.decodeIfPresent(HeroVideo.self, forKey: .heroVideo)
     }
 }
 

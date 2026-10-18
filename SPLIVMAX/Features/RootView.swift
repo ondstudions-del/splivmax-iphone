@@ -47,8 +47,6 @@ struct RootView: View {
     @EnvironmentObject private var network: NetworkMonitor
     @Environment(\.scenePhase) private var scenePhase
     @State private var splashDone = false
-    /// Solo true tras salir de verdad a segundo plano (no por Control Center / notificaciones).
-    @State private var leftAppCompletely = false
 
     var body: some View {
         ZStack {
@@ -124,21 +122,10 @@ struct RootView: View {
             withAnimation(.easeOut(duration: 0.45)) { splashDone = true }
         }
         .onChange(of: scenePhase) { phase in
-            switch phase {
-            case .background:
-                // Salida completa (Home / otra app). Inactive (Control Center) no cuenta.
-                leftAppCompletely = true
-            case .active:
-                // Perfiles solo al volver tras salir del todo — nunca en offline ni con el reproductor abierto.
-                if leftAppCompletely, player.request == nil, network.isOnline {
-                    session.askWhoIsWatching()
-                }
-                leftAppCompletely = false
-                if session.isLoggedIn, network.isOnline {
-                    Task { await session.refreshMe() }
-                }
-            default:
-                break
+            // Al salir a segundo plano no se muestra el selector de perfiles.
+            // «¿Quién está viendo?» solo al cerrar la app y volver a abrirla (arranque en SessionStore).
+            if phase == .active, session.isLoggedIn, network.isOnline, player.request == nil {
+                Task { await session.refreshMe() }
             }
         }
         .onChange(of: network.isOnline) { online in
@@ -218,7 +205,7 @@ struct MainTabView: View {
     }
 }
 
-/// Barra inferior de la web móvil (.tabbar): 5 accesos, fondo translúcido, icono activo en cian.
+/// Barra inferior: 5 accesos, material, indicador activo fluido.
 struct TabBar: View {
     let selection: AppTab
     let onSelect: (AppTab) -> Void
@@ -232,38 +219,45 @@ struct TabBar: View {
             item(.search, "Buscar", "magnifyingglass", "magnifyingglass")
             accountItem
         }
-        .padding(.top, 7)
-        .padding(.bottom, 2)
+        .padding(.top, 8)
+        .padding(.bottom, 3)
         .frame(maxWidth: .infinity)
         .background {
             ZStack {
                 Rectangle().fill(.ultraThinMaterial)
-                Theme.bg.opacity(0.86)
+                Theme.bg.opacity(0.78)
             }
             .ignoresSafeArea(edges: .bottom)
         }
         .overlay(alignment: .top) {
-            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 0.5)
+            LinearGradient(colors: [Color.white.opacity(0.12), Color.white.opacity(0.02)], startPoint: .leading, endPoint: .trailing)
+                .frame(height: 0.6)
         }
     }
 
     private func item(_ tab: AppTab, _ label: String, _ icon: String, _ filled: String) -> some View {
         let on = selection == tab
         return Button { onSelect(tab) } label: {
-            VStack(spacing: 3) {
-                Image(systemName: on ? filled : icon)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(on ? Theme.accent2 : Theme.muted)
-                    .scaleEffect(on ? 1.06 : 1)
-                    .offset(y: on ? -1 : 0)
-                    .frame(height: 26)
+            VStack(spacing: 4) {
+                ZStack {
+                    if on {
+                        Capsule()
+                            .fill(Theme.accent2.opacity(0.16))
+                            .frame(width: 52, height: 28)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                    Image(systemName: on ? filled : icon)
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundColor(on ? Theme.accent2 : Theme.muted)
+                        .frame(height: 26)
+                }
                 Text(label)
-                    .font(.system(size: 10.5, weight: .semibold))
+                    .font(.system(size: 10.5, weight: on ? .bold : .semibold))
                     .foregroundColor(on ? .white : Theme.muted)
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: on)
+            .animation(Theme.softMotion, value: on)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(label))
@@ -274,24 +268,32 @@ struct TabBar: View {
         let on = selection == .account
         let label = session.isLoggedIn ? "Perfil" : "Entrar"
         return Button { onSelect(.account) } label: {
-            VStack(spacing: 3) {
-                Group {
-                    if session.isLoggedIn, let profile = session.profile {
-                        AvatarView(url: profile.avatarUrl, size: 24, name: profile.name)
-                            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(on ? Theme.accent2 : .clear, lineWidth: 1.5))
-                    } else {
-                        Image(systemName: on ? "person.crop.circle.fill" : "person.crop.circle")
-                            .font(.system(size: 21, weight: .medium))
-                            .foregroundColor(on ? Theme.accent2 : Theme.muted)
+            VStack(spacing: 4) {
+                ZStack {
+                    if on {
+                        Capsule()
+                            .fill(Theme.accent2.opacity(0.16))
+                            .frame(width: 52, height: 28)
                     }
+                    Group {
+                        if session.isLoggedIn, let profile = session.profile {
+                            AvatarView(url: profile.avatarUrl, size: 24, name: profile.name)
+                                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(on ? Theme.accent2 : .clear, lineWidth: 1.5))
+                        } else {
+                            Image(systemName: on ? "person.crop.circle.fill" : "person.crop.circle")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(on ? Theme.accent2 : Theme.muted)
+                        }
+                    }
+                    .frame(height: 26)
                 }
-                .frame(height: 26)
                 Text(label)
-                    .font(.system(size: 10.5, weight: .semibold))
+                    .font(.system(size: 10.5, weight: on ? .bold : .semibold))
                     .foregroundColor(on ? .white : Theme.muted)
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
+            .animation(Theme.softMotion, value: on)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(label))

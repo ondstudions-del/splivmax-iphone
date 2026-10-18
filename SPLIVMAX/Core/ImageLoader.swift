@@ -24,12 +24,13 @@ final class ImagePipeline: @unchecked Sendable {
     }
 
     private init() {
-        memory.totalCostLimit = 96 * 1024 * 1024
+        memory.totalCostLimit = 128 * 1024 * 1024
         let config = URLSessionConfiguration.default
-        config.urlCache = URLCache(memoryCapacity: 16 * 1024 * 1024, diskCapacity: 250 * 1024 * 1024)
+        config.urlCache = URLCache(memoryCapacity: 32 * 1024 * 1024, diskCapacity: 320 * 1024 * 1024)
         config.requestCachePolicy = .returnCacheDataElseLoad
         config.timeoutIntervalForRequest = 25
-        config.httpMaximumConnectionsPerHost = 6
+        config.httpMaximumConnectionsPerHost = 8
+        config.waitsForConnectivity = true
         session = URLSession(configuration: config)
     }
 
@@ -71,7 +72,10 @@ final class ImagePipeline: @unchecked Sendable {
 
     func prefetch(_ urls: [URL], maxPixel: CGFloat) {
         guard !lowData, !videoActive else { return }
-        for url in urls.prefix(12) where cached(url, maxPixel: maxPixel) == nil {
+        var seen = Set<String>()
+        for url in urls where seen.insert(url.absoluteString).inserted {
+            guard cached(url, maxPixel: maxPixel) == nil else { continue }
+            if seen.count > 40 { break }
             Task.detached(priority: .utility) { _ = await self.load(url, maxPixel: maxPixel) }
         }
     }
@@ -141,10 +145,14 @@ struct RemoteImage: View {
                     result = await ImagePipeline.shared.load(url, maxPixel: maxPixel)
                 }
                 guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.25)) {
+                withAnimation(.easeOut(duration: 0.2)) {
                     image = result
                     loadedURL = url
                 }
+            }
+            .onAppear {
+                guard let url, image == nil else { return }
+                Task { _ = await ImagePipeline.shared.load(url, maxPixel: maxPixel) }
             }
     }
 

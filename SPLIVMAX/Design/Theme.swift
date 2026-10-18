@@ -45,10 +45,12 @@ enum Theme {
         .init(color: bg.opacity(0), location: 0.55),
     ], startPoint: .bottom, endPoint: .top)
 
-    static let radius: CGFloat = 12
-    static let radiusSmall: CGFloat = 8
-    static let radiusLarge: CGFloat = 18
-    static let gutter: CGFloat = 12
+    static let radius: CGFloat = 14
+    static let radiusSmall: CGFloat = 10
+    static let radiusLarge: CGFloat = 20
+    static let gutter: CGFloat = 14
+
+    static let softMotion = Animation.spring(response: 0.42, dampingFraction: 0.86)
 }
 
 enum Haptics {
