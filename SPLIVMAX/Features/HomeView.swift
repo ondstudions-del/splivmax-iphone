@@ -289,7 +289,7 @@ struct HeroCard: View {
 
     private func play() {
         guard session.requireLogin() else { return }
-        player.play(titleId: card.id, title: card.title, artworkURL: card.wideImage ?? card.tallImage)
+        player.play(titleId: card.id, title: card.title)
     }
 }
 
@@ -415,8 +415,7 @@ struct ContinueRow: View {
                             player.play(
                                 titleId: item.title.id,
                                 episodeId: item.episode?.id,
-                                title: item.title.title,
-                                artworkURL: item.episode?.thumbnail ?? item.title.wideImage ?? item.title.tallImage
+                                title: item.title.title
                             )
                         } label: {
                             ContinueCard(item: item)

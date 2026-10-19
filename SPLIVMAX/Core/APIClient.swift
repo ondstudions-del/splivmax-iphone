@@ -111,7 +111,7 @@ final class APIClient: @unchecked Sendable {
                                 as type: T.Type = T.self) async throws -> (data: T, meta: PageMeta?) {
         let resolved = Self.resolvePath(path)
         let cacheTTL = method == .get ? ResponseCache.ttl(for: resolved) : nil
-        let cacheKey: String? = cacheTTL.map {
+        let cacheKey: String? = cacheTTL.map { _ in
             ResponseCache.shared.key(path: resolved, query: query, authorized: authorized, tokenHint: token)
         }
 
