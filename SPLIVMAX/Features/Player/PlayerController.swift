@@ -9,8 +9,6 @@ struct PlayRequest: Identifiable, Equatable {
     let titleId: String
     var episodeId: String?
     let title: String
-    /// Imagen de portada mientras carga el stream.
-    var artworkURL: URL? = nil
     /// Archivo local (Ver sin conexión). No se usa la API de streaming.
     var localFileURL: URL? = nil
     var isMatroska: Bool = false
@@ -27,13 +25,11 @@ final class PlayerCoordinator: ObservableObject {
     @Published private(set) var closedCount = 0
 
     func play(titleId: String, episodeId: String? = nil, title: String,
-              artworkURL: URL? = nil,
               localFileURL: URL? = nil, isMatroska: Bool = false) {
         request = PlayRequest(
             titleId: titleId,
             episodeId: episodeId,
             title: title,
-            artworkURL: artworkURL,
             localFileURL: localFileURL,
             isMatroska: isMatroska
         )
@@ -164,8 +160,7 @@ final class PlayerController: NSObject, ObservableObject {
     init(request: PlayRequest) {
         self.request = request
         super.init()
-        // false = arranca en cuanto hay ~1 s de búfer (menos tiempo en «Cargando…»).
-        player.automaticallyWaitsToMinimizeStalling = false
+        player.automaticallyWaitsToMinimizeStalling = true
         player.appliesMediaSelectionCriteriaAutomatically = false
         player.allowsExternalPlayback = true
         player.usesExternalPlaybackWhileExternalScreenIsActive = true
@@ -199,13 +194,7 @@ final class PlayerController: NSObject, ObservableObject {
         if let ep = request.episodeId { query["episode"] = ep }
         if lowData { query["lite"] = "1" }
         do {
-            // Timeout corto: «Conectando…» no debe quedarse colgado 20 s.
-            let d: PlaybackData = try await api.send(
-                .get,
-                "/playback/\(request.titleId)",
-                query: query,
-                timeout: 12
-            )
+            let d: PlaybackData = try await api.send(.get, "/playback/\(request.titleId)", query: query)
             guard !closed else { return }
             startAttempts = 0
             data = d
@@ -219,15 +208,9 @@ final class PlayerController: NSObject, ObservableObject {
                 fail(message: "Este contenido todavía no tiene una fuente de vídeo disponible.", code: "no_source")
                 return
             }
-            // Primero el vídeo; subtítulos y artwork no deben retrasar el primer fotograma.
             load(first, at: Double(d.resume))
-            Task { @MainActor [weak self] in
-                guard let self, !self.closed else { return }
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                guard !self.closed else { return }
-                self.selectInitialSubtitle(d)
-                self.loadArtwork(d.title.backdrop)
-            }
+            selectInitialSubtitle(d)
+            loadArtwork(d.title.backdrop)
         } catch is CancellationError {
         } catch {
             let e = APIError.from(error)
@@ -239,7 +222,7 @@ final class PlayerController: NSObject, ObservableObject {
                 if network.isOnline {
                     startAttempts += 1
                     Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
                         guard let self, self.retryStartWhenOnline, !self.closed else { return }
                         await self.start()
                     }
@@ -300,21 +283,12 @@ final class PlayerController: NSObject, ObservableObject {
         player.volume = 1
     }
 
-    /// Orden orientado a arranque rápido: HLS adaptativo / ~720p primero; MKV al final (VLC).
+    /// HLS/MP4 primero (AVPlayer); MKV al final (motor VLC).
     private func order(_ sources: [PlaybackSource]) -> [PlaybackSource] {
-        func fastStartRank(_ s: PlaybackSource) -> Int {
-            // Preferir cerca de 720p (arranque más rápido que 1080/4K).
-            abs(s.quality - 720)
-        }
-        let hls = sources.filter(\.hls).sorted {
-            if $0.quality == $1.quality { return false }
-            return fastStartRank($0) < fastStartRank($1)
-        }
-        var files = sources.filter { !$0.hls && !$0.isMatroska }.sorted {
-            fastStartRank($0) < fastStartRank($1)
-        }
-        let mkv = sources.filter(\.isMatroska).sorted { fastStartRank($0) < fastStartRank($1) }
-        if lowData { files = files.sorted { $0.quality < $1.quality } }
+        let hls = sources.filter(\.hls).sorted { $0.quality > $1.quality }
+        var files = sources.filter { !$0.hls && !$0.isMatroska }.sorted { $0.quality > $1.quality }
+        let mkv = sources.filter(\.isMatroska).sorted { $0.quality > $1.quality }
+        if lowData || !network.isOnline { files.reverse() }
         return hls + files + mkv
     }
 
@@ -335,13 +309,11 @@ final class PlayerController: NSObject, ObservableObject {
             AVURLAssetAllowsConstrainedNetworkAccessKey: true,
         ]
         let asset = AVURLAsset(url: source.url, options: options)
-        // Cargar solo lo mínimo para empezar a pintar cuanto antes.
-        let item = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: ["playable", "duration"])
-        item.preferredForwardBufferDuration = 2
+        let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = 4
         item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
         item.startsOnFirstEligibleVariant = true
-        // Seek de reanudación: dejar ver el primer fotograma y saltar después (arranque percibido más rápido).
-        pendingSeek = time > 8 ? time : nil
+        pendingSeek = time > 5 ? time : nil
         rampedUp = false
         smoothSince = nil
         stallTimes = []
@@ -350,12 +322,15 @@ final class PlayerController: NSObject, ObservableObject {
         lastDataAt = Date()
         applyBitrate(to: item, startup: true)
         observe(item)
+        if pendingSeek != nil && player.rate != 0 {
+            switchingItem = true
+            player.pause()
+        }
         player.replaceCurrentItem(with: item)
         isBuffering = true
-        if shouldPlay {
+        if pendingSeek == nil && shouldPlay {
             player.defaultRate = rate
-            // Empuja reproducción sin esperar al búfer «ideal» de AVPlayer.
-            player.playImmediately(atRate: rate)
+            player.play()
         }
     }
 
@@ -426,18 +401,19 @@ final class PlayerController: NSObject, ObservableObject {
         }.store(in: &vlcBag)
     }
 
-    /// Precarga en Wi-Fi (segundos). Antes era 300 s y robaba ancho de banda al arranque.
-    static let preloadSeconds: Double = 45
+    /// Vídeo que se precarga en Wi-Fi (5 minutos); AVPlayer puede guardar menos si el iPhone va justo de memoria.
+    static let preloadSeconds: Double = 300
 
     static var preloadEnabled: Bool {
         UserDefaults.standard.object(forKey: Prefs.preloadKey) as? Bool ?? true
     }
 
-    /// Búfer estable tras el primer fotograma (no durante «Cargando…»).
+    /// Lo que se descarga por adelantado una vez arrancado: poco en ahorro de datos, moderado con
+    /// datos móviles y, en Wi-Fi, varios minutos (precarga) para que un bajón de la conexión no corte el vídeo.
     private var steadyBuffer: Double {
-        if lowData || qualityMode == .saver { return 8 }
-        if network.isWiFi { return Self.preloadEnabled ? Self.preloadSeconds : 12 }
-        return 22
+        if lowData || qualityMode == .saver { return 10 }
+        if network.isWiFi { return Self.preloadEnabled ? Self.preloadSeconds : 0 }
+        return 40
     }
 
     /// Se llama al cambiar la red o la precarga: el búfer se ajusta sin cortar la reproducción.
@@ -473,16 +449,15 @@ final class PlayerController: NSObject, ObservableObject {
         item.preferredPeakBitRateForExpensiveNetworks = Self.cellularPeakBitRate
         if startup {
             let wifi = network.isWiFi
-            // Tope bajo al inicio → primer fotograma antes; se libera tras ~5 s fluidos.
-            let cap: Double = wifi ? 2_200_000 : 1_400_000
+            let cap: Double = wifi ? 4_000_000 : 2_500_000
             if let estimate = BandwidthMemory.estimate(wifi: wifi) {
-                let target: Double = min(estimate * 0.45, cap)
-                item.preferredPeakBitRate = max(600_000.0, target)
+                let target: Double = min(estimate * 0.5, cap)
+                item.preferredPeakBitRate = max(700_000.0, target)
             } else {
-                item.preferredPeakBitRate = wifi ? 1_600_000.0 : 900_000.0
+                item.preferredPeakBitRate = wifi ? 2_500_000.0 : 1_200_000.0
             }
         } else if !stallTimes.isEmpty && !rampedUp {
-            item.preferredPeakBitRate = 1_800_000
+            item.preferredPeakBitRate = 2_500_000
         } else {
             item.preferredPeakBitRate = 0
         }
@@ -494,12 +469,13 @@ final class PlayerController: NSObject, ObservableObject {
         quickStartIfPossible(item)
     }
 
-    /// Arranque agresivo: con ~0.8–1.2 s de búfer ya se pinta imagen.
+    /// AVPlayer espera bastante búfer antes de empezar; con 2-3 s ya cargados se arranca
+    /// (si esto provoca un corte enseguida, se vuelve al criterio de AVPlayer).
     private func quickStartIfPossible(_ item: AVPlayerItem) {
-        guard item === player.currentItem, !quickStartDisabled, !closed, !userPaused else { return }
-        let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
-            || player.timeControlStatus == .paused
-        guard waiting || !isPlaying else { return }
+        guard item === player.currentItem, !quickStartDisabled, !closed,
+              player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+              player.reasonForWaitingToPlay == .toMinimizeStalls,
+              pendingSeek == nil else { return }
         let now = item.currentTime().seconds
         guard now.isFinite else { return }
         var ahead: Double = 0
@@ -512,8 +488,8 @@ final class PlayerController: NSObject, ObservableObject {
                 break
             }
         }
-        let needed: Double = (network.isWiFi && !lowData) ? 0.8 : 1.2
-        guard ahead >= needed || item.isPlaybackLikelyToKeepUp else { return }
+        let needed: Double = (network.isWiFi && !lowData) ? 2 : 3
+        guard ahead >= needed else { return }
         quickStartedAt = Date()
         player.playImmediately(atRate: rate)
     }
@@ -624,8 +600,9 @@ final class PlayerController: NSObject, ObservableObject {
         center.publisher(for: UIApplication.didBecomeActiveNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                // iOS a veces reactiva el apagado automático al volver a primer plano.
-                guard let self, !self.closed else { return }
+                // Al volver a la app iOS puede haber restablecido el apagado automático de la pantalla.
+                guard let self, !self.closed, self.isPlaying || self.isBuffering else { return }
+                UIApplication.shared.isIdleTimerDisabled = false
                 self.keepScreenAwake(true)
             }
             .store(in: &bag)
@@ -637,34 +614,18 @@ final class PlayerController: NSObject, ObservableObject {
         case .readyToPlay:
             duration = finite(item.duration.seconds)
             if phase != .playing { phase = .playing }
-            // Opciones de audio/subs: después del arranque para no bloquear el primer frame.
-            Task {
-                try? await Task.sleep(nanoseconds: 700_000_000)
-                guard !self.closed, self.player.currentItem === item else { return }
-                await self.loadMediaOptions(for: item)
-            }
-            // Primero reproducir; el seek de «continuar» va justo después con tolerancia amplia.
-            resumeUnlessPaused()
+            Task { await loadMediaOptions(for: item) }
             if let seek = pendingSeek, duration == 0 || seek < duration - 20 {
                 pendingSeek = nil
-                player.seek(
-                    to: CMTime(seconds: seek, preferredTimescale: 600),
-                    toleranceBefore: CMTime(seconds: 5, preferredTimescale: 600),
-                    toleranceAfter: CMTime(seconds: 2, preferredTimescale: 600)
-                ) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.resumeUnlessPaused()
-                        // Ampliar búfer solo cuando ya hay imagen.
-                        if let it = self?.player.currentItem {
-                            it.preferredForwardBufferDuration = self?.steadyBuffer ?? 22
-                        }
-                    }
+                // Con margen hacia atrás AVPlayer retoma en el inicio de segmento más cercano: arranca antes.
+                player.seek(to: CMTime(seconds: seek, preferredTimescale: 600),
+                            toleranceBefore: CMTime(seconds: 3, preferredTimescale: 600),
+                            toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
+                    Task { @MainActor in self?.resumeUnlessPaused() }
                 }
             } else {
                 pendingSeek = nil
-                if hasVideo || item.isPlaybackLikelyToKeepUp {
-                    item.preferredForwardBufferDuration = steadyBuffer
-                }
+                resumeUnlessPaused()
             }
         case .failed:
             sourceFailed(item.error)
@@ -690,8 +651,7 @@ final class PlayerController: NSObject, ObservableObject {
                 report("start")
                 startHeartbeat()
             }
-            // No ampliar el búfer en el mismo instante del primer frame (roba ancho de banda).
-            if rampedUp { refreshBuffer() }
+            refreshBuffer()
         case .waitingToPlayAtSpecifiedRate:
             isBuffering = true
             smoothSince = nil
@@ -735,13 +695,10 @@ final class PlayerController: NSObject, ObservableObject {
             let text = SubtitleParser.caption(in: cues, at: seconds)
             if text != caption { caption = text }
         }
-        // Tras ~5 s fluidos se libera el tope de calidad inicial.
-        if !rampedUp, let since = smoothSince, Date().timeIntervalSince(since) > 5 {
+        // Tras 8 s sin cortes se libera el tope de calidad inicial.
+        if !rampedUp, let since = smoothSince, Date().timeIntervalSince(since) > 8 {
             rampedUp = true
             applyBitrate(to: player.currentItem, startup: false)
-            if let item = player.currentItem, item.preferredForwardBufferDuration < steadyBuffer {
-                item.preferredForwardBufferDuration = steadyBuffer
-            }
         }
         updateCountdown(seconds)
         updateNowPlaying(force: false)
@@ -1155,8 +1112,8 @@ final class PlayerController: NSObject, ObservableObject {
 
     // MARK: Pantalla encendida
 
-    /// Mientras el reproductor está abierto (película o episodio), la pantalla no se apaga:
-    /// ni en reproducción, ni en buffer, ni en pausa. Solo al cerrar o al terminar.
+    /// La pantalla no se apaga mientras se reproduce o carga una película o un episodio.
+    /// En pausa se mantiene encendida unos minutos más y después iOS puede apagarla.
     private func keepScreenAwake(_ awake: Bool) {
         idleTask?.cancel()
         idleTask = nil
@@ -1165,8 +1122,11 @@ final class PlayerController: NSObject, ObservableObject {
             UIApplication.shared.isIdleTimerDisabled = true
             return
         }
-        // Pausar no apaga la pantalla: el usuario sigue en la sesión de visionado.
-        UIApplication.shared.isIdleTimerDisabled = true
+        idleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000_000)
+            guard !Task.isCancelled, let controller = self, !controller.isPlaying, !controller.isBuffering else { return }
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 
     private func allowScreenSleep() {

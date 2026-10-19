@@ -156,18 +156,84 @@ struct AccountView: View {
         MenuSection(title: "General") {
             MenuRow(route: .settings, icon: "gearshape", title: "Ajustes")
             MenuRow(route: .help, icon: "questionmark.circle", title: "Ayuda")
-            MenuButtonRow(icon: "doc.text", title: "Términos y condiciones") { open(\.terms, "terminos") }
-            MenuButtonRow(icon: "hand.raised", title: "Política de privacidad") { open(\.privacy, "privacidad") }
+            MenuRow(route: .legalTerms, icon: "doc.text", title: "Términos y condiciones")
+            MenuRow(route: .legalPrivacy, icon: "hand.raised", title: "Política de privacidad")
+        }
+    }
+}
+
+// MARK: - Documentos legales (dentro de la app, sin Safari)
+
+struct LegalDocumentView: View {
+    enum Kind: String {
+        case terms, privacy
+        var title: String {
+            switch self {
+            case .terms: return "Términos y condiciones"
+            case .privacy: return "Política de privacidad"
+            }
         }
     }
 
-    private func open(_ path: KeyPath<ServerConfig.Links, String>, _ fallback: String) {
-        if let raw = session.config?.links[keyPath: path], let url = URL(string: raw) {
-            link = WebLink(url: url)
-        } else {
-            link = WebLink(url: AppConfig.webURL.appendingPathComponent(fallback))
+    let kind: Kind
+    @State private var heading = ""
+    @State private var text = ""
+    @State private var loading = true
+    @State private var error: APIError?
+
+    var body: some View {
+        Group {
+            if loading && text.isEmpty {
+                LoadingView()
+            } else if let error, text.isEmpty {
+                ErrorStateView(error: error) { Task { await load() } }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(heading.isEmpty ? kind.title : heading)
+                            .font(.system(size: 22, weight: .heavy))
+                            .foregroundColor(Theme.text)
+                        Text(text.isEmpty ? "Documento no disponible por ahora." : text)
+                            .font(.system(size: 15))
+                            .foregroundColor(Theme.text2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(Theme.gutter)
+                    .padding(.bottom, 40)
+                }
+            }
         }
+        .screenBackground()
+        .navigationTitle(kind.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await load() }
+        .refreshable { await load() }
     }
+
+    private func load() async {
+        do {
+            let r: LegalDocument = try await APIClient.shared.send(.get, "/legal/\(kind.rawValue)", authorized: false)
+            heading = r.heading
+            text = r.text
+            error = nil
+        } catch {
+            self.error = APIError.from(error)
+        }
+        loading = false
+    }
+}
+
+struct LegalDocument: Decodable {
+    let heading: String
+    let text: String
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        heading = (try? c.decode(String.self, forKey: .heading)) ?? ""
+        text = (try? c.decode(String.self, forKey: .text)) ?? ""
+    }
+
+    enum CodingKeys: String, CodingKey { case heading, text }
 }
 
 // MARK: - Tarjeta del plan
@@ -724,16 +790,17 @@ struct SettingsView: View {
             }
 
             Section {
-                Button(cleared ? "Caché borrada" : "Borrar caché de imágenes") {
-                    ImagePipeline.shared.clearMemory()
+                Button(cleared ? "Caché borrada" : "Borrar caché") {
+                    ImagePipeline.shared.clearAll()
                     URLCache.shared.removeAllCachedResponses()
                     APIClient.shared.clearCache()
+                    ResponseCache.shared.clear()
                     cleared = true
                     Haptics.success()
                 }
                 .disabled(cleared)
             } header: { Text("Almacenamiento") } footer: {
-                Text("SPLIVMAX no descarga vídeos en el iPhone: todo se reproduce en línea.")
+                Text("Borra pósteres, catálogo e inicio en caché. Las descargas Offline no se eliminan. El vídeo en streaming no se guarda en Fotos.")
             }
 
             Section {

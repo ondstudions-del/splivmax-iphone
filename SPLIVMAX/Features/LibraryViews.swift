@@ -194,7 +194,7 @@ struct NotificationsView: View {
             } else if !loaded {
                 LoadingView()
             } else if items.isEmpty {
-                EmptyStateView(icon: "bell.slash", title: "Sin notificaciones", message: "Te avisaremos de estrenos y novedades de tu cuenta.")
+                EmptyStateView(icon: "bell.slash", title: "Sin notificaciones", message: "Te avisaremos de planes, respuestas de soporte y estrenos destacados.")
                     .frame(maxHeight: .infinity)
             } else {
                 List {
@@ -228,11 +228,20 @@ struct NotificationsView: View {
         let label = NotificationRow(notification: n)
         if let titleId = n.titleId {
             NavigationLink(value: Route.titleId(titleId)) { label }
+        } else if (n.category ?? "").lowercased() == "plan" || linkPath(n.link).contains("/planes") {
+            NavigationLink(value: Route.plans) { label }
+        } else if (n.category ?? "").lowercased() == "support" {
+            NavigationLink(value: Route.help) { label }
         } else if let raw = n.link, let url = URL(string: raw), url.scheme == "https", AppConfig.billingMode == .direct || !isBillingLink(url) {
             Button { link = WebLink(url: url) } label: { label }
         } else {
             label
         }
+    }
+
+    private func linkPath(_ link: String?) -> String {
+        guard let link, let url = URL(string: link) else { return "" }
+        return url.path.lowercased()
     }
 
     private func isBillingLink(_ url: URL) -> Bool {
@@ -265,14 +274,23 @@ private struct NotificationRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Circle()
-                .fill(notification.read ? Color.clear : Theme.accent2)
-                .frame(width: 8, height: 8)
-                .padding(.top, 6)
+            ZStack {
+                Circle()
+                    .fill(notification.read ? Theme.surface2 : Theme.accent2.opacity(0.22))
+                    .frame(width: 36, height: 36)
+                Image(systemName: notification.iconName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(notification.read ? Theme.muted : Theme.accent2)
+            }
             VStack(alignment: .leading, spacing: 4) {
-                Text(notification.title)
-                    .font(.system(size: 15, weight: notification.read ? .medium : .bold))
-                    .foregroundColor(Theme.text)
+                HStack(spacing: 6) {
+                    Text(notification.title)
+                        .font(.system(size: 15, weight: notification.read ? .medium : .bold))
+                        .foregroundColor(Theme.text)
+                    if !notification.read {
+                        Circle().fill(Theme.accent2).frame(width: 7, height: 7)
+                    }
+                }
                 if !notification.body.isEmpty {
                     Text(notification.body).font(.system(size: 13.5)).foregroundColor(Theme.text2)
                 }

@@ -117,6 +117,8 @@ final class SessionStore: ObservableObject {
     }
 
     private func apply(me: MeData) {
+        let scope = me.profile?.id ?? me.user.id
+        api.setCacheScope(scope)
         user = me.user
         if let p = me.profile { profile = p }
         subscription = me.subscription
@@ -165,6 +167,7 @@ final class SessionStore: ObservableObject {
         KeychainStore.set(token, for: "token")
         api.token = token
         api.clearCache()
+        api.setCacheScope(session.profile?.id ?? user.id)
         favoriteOverrides = [:]
         self.user = user
         profile = session.profile
@@ -193,6 +196,7 @@ final class SessionStore: ObservableObject {
         KeychainStore.set(nil, for: "token")
         api.token = nil
         api.clearCache()
+        api.setCacheScope("anon")
         UserDefaults.standard.removeObject(forKey: Self.meCacheKey)
         user = nil
         profile = nil
@@ -268,6 +272,7 @@ final class SessionStore: ObservableObject {
         if let pin, !pin.isEmpty { body["pin"] = pin }
         let r: ProfileResponse = try await api.send(.post, "/profiles/\(id)/select", body: body)
         api.clearCache()
+        api.setCacheScope(r.profile.id)
         profile = r.profile
         loadFavoriteCache()
         profileChoiceRequired = false

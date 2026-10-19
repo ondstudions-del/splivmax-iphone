@@ -99,6 +99,13 @@ struct SearchView: View {
         .safeAreaInset(edge: .top, spacing: 0) { searchBar }
         .screenBackground()
         .toolbar(.hidden, for: .navigationBar)
+        .refreshable {
+            if model.query.trimmingCharacters(in: .whitespaces).count >= 2 {
+                await model.run(model.query)
+            } else {
+                await model.loadGenres()
+            }
+        }
         .task(id: model.query) { await model.run(model.query) }
         .task { await model.loadGenres() }
     }

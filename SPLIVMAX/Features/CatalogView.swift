@@ -43,7 +43,8 @@ final class CatalogModel: ObservableObject {
     }
 
     private func loadPage(generation gen: Int, replace: Bool) async {
-        loading = true
+        let showSpinner = replace && items.isEmpty
+        if showSpinner { loading = true }
         do {
             let result: (data: [TitleCard], meta: PageMeta?) = try await APIClient.shared.sendPage(.get, "/catalog", query: [
                 "type": type ?? "",
@@ -67,7 +68,7 @@ final class CatalogModel: ObservableObject {
         } catch {
             guard gen == generation else { return }
             let e = APIError.from(error)
-            if !["profile_setup", "profile_required"].contains(e.code) { self.error = e }
+            if items.isEmpty, !["profile_setup", "profile_required"].contains(e.code) { self.error = e }
             if !replace { page = max(1, page - 1) }
         }
         if gen == generation { loading = false }

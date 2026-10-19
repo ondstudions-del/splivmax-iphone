@@ -16,6 +16,8 @@ enum Route: Hashable {
     case manageProfiles
     case payments
     case help
+    case legalTerms
+    case legalPrivacy
 }
 
 struct RouteDestination: View {
@@ -37,6 +39,8 @@ struct RouteDestination: View {
         case .manageProfiles: ManageProfilesView()
         case .payments: PaymentsView()
         case .help: HelpView()
+        case .legalTerms: LegalDocumentView(kind: .terms)
+        case .legalPrivacy: LegalDocumentView(kind: .privacy)
         }
     }
 }

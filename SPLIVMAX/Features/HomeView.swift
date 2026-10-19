@@ -10,7 +10,8 @@ final class HomeModel: ObservableObject {
 
     func load(version: Int, force: Bool = false) async {
         guard force || loadedVersion != version || data == nil else { return }
-        loading = true
+        let showSpinner = data == nil
+        if showSpinner { loading = true }
         defer { loading = false }
         do {
             let home: HomeData = try await APIClient.shared.send(.get, "/home")
@@ -21,7 +22,7 @@ final class HomeModel: ObservableObject {
         } catch is CancellationError {
         } catch {
             let e = APIError.from(error)
-            if !["profile_setup", "profile_required"].contains(e.code) { self.error = e }
+            if data == nil, !["profile_setup", "profile_required"].contains(e.code) { self.error = e }
         }
     }
 

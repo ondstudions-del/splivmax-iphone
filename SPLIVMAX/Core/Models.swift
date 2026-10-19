@@ -289,6 +289,18 @@ struct Episode: Codable, Hashable, Identifiable {
 
     var code: String { "T\(season ?? 0):E\(number ?? 0)" }
 
+    /// Miniatura usable en iOS (ignora SVG/placeholder que UIImage no decodifica).
+    func artURL(fallback: URL? = nil) -> URL? {
+        if let thumbnail, !Self.isPlaceholder(thumbnail) { return thumbnail }
+        if let fallback, !Self.isPlaceholder(fallback) { return fallback }
+        return nil
+    }
+
+    private static func isPlaceholder(_ url: URL) -> Bool {
+        let s = url.absoluteString.lowercased()
+        return s.hasSuffix(".svg") || s.contains("placeholder")
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, season, number, title, synopsis, durationMin, thumbnail, playable, releaseAt, progress
     }
@@ -301,8 +313,9 @@ struct Episode: Codable, Hashable, Identifiable {
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         synopsis = (try? c.decode(String.self, forKey: .synopsis)) ?? ""
         durationMin = c.flexInt(.durationMin)
-        if let s = try? c.decodeIfPresent(String.self, forKey: .thumbnail) {
-            thumbnail = URL(string: s)
+        if let s = try? c.decodeIfPresent(String.self, forKey: .thumbnail),
+           let u = URL(string: s), !Self.isPlaceholder(u) {
+            thumbnail = u
         } else {
             thumbnail = nil
         }
@@ -524,24 +537,43 @@ struct AppNotification: Decodable, Identifiable {
     let titleId: String?
     var read: Bool
     let createdAt: String?
+    let category: String?
+
+    var iconName: String {
+        switch (category ?? "").lowercased() {
+        case "plan", "billing", "subscription": return "crown.fill"
+        case "support", "help": return "questionmark.bubble.fill"
+        case "premiere", "featured", "catalog": return "sparkles.tv.fill"
+        default: return "bell.fill"
+        }
+    }
 }
 
-struct Comment: Decodable, Identifiable {
+struct Comment: Decodable, Identifiable, Equatable {
     let id: String
+    let parentId: String?
     let author: String
     let avatarUrl: URL?
     let body: String
     let createdAt: String?
     let mine: Bool
     let canDelete: Bool
+    var likes: Int
+    var dislikes: Int
+    /// 1 = like, -1 = dislike, 0 = sin voto
+    var myVote: Int
+    var replies: [Comment]
+    var repliesCount: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, author, avatarUrl, body, createdAt, mine, canDelete
+        case id, parentId, author, avatarUrl, body, createdAt, mine, canDelete
+        case likes, dislikes, myVote, replies, repliesCount
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
+        parentId = try? c.decodeIfPresent(String.self, forKey: .parentId)
         author = (try? c.decode(String.self, forKey: .author)) ?? "Usuario"
         if let s = try? c.decodeIfPresent(String.self, forKey: .avatarUrl) {
             avatarUrl = URL(string: s)
@@ -552,6 +584,20 @@ struct Comment: Decodable, Identifiable {
         createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
         mine = (try? c.decode(Bool.self, forKey: .mine)) ?? false
         canDelete = (try? c.decode(Bool.self, forKey: .canDelete)) ?? mine
+        likes = c.flexInt(.likes) ?? 0
+        dislikes = c.flexInt(.dislikes) ?? 0
+        let vote = c.flexInt(.myVote) ?? 0
+        myVote = (vote == 1 || vote == -1) ? vote : 0
+        replies = (try? c.decodeIfPresent([Comment].self, forKey: .replies)) ?? []
+        repliesCount = c.flexInt(.repliesCount) ?? replies.count
+    }
+
+    static func == (lhs: Comment, rhs: Comment) -> Bool {
+        lhs.id == rhs.id
+            && lhs.likes == rhs.likes
+            && lhs.dislikes == rhs.dislikes
+            && lhs.myVote == rhs.myVote
+            && lhs.replies == rhs.replies
     }
 }
 

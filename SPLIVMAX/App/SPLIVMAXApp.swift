@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AVFoundation
 
 @main
@@ -35,6 +36,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // Con la categoría "playback" el vídeo suena aunque el iPhone esté en silencio y permite PiP.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
         Appearance.configure()
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main,
+        ) { _ in
+            ImagePipeline.shared.clearMemory()
+        }
         return true
     }
 

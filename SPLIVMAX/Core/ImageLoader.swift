@@ -23,14 +23,24 @@ final class ImagePipeline: @unchecked Sendable {
         set { lock.lock(); _videoActive = newValue; lock.unlock() }
     }
 
+    private let imageCache: URLCache
+    private var prefetchBudget = 0
+    private let prefetchLock = NSLock()
+
     private init() {
-        memory.totalCostLimit = 128 * 1024 * 1024
+        memory.totalCostLimit = 96 * 1024 * 1024
+        memory.countLimit = 220
+        imageCache = URLCache(
+            memoryCapacity: 48 * 1024 * 1024,
+            diskCapacity: 400 * 1024 * 1024,
+            diskPath: "spx.images.v1",
+        )
         let config = URLSessionConfiguration.default
-        config.urlCache = URLCache(memoryCapacity: 32 * 1024 * 1024, diskCapacity: 320 * 1024 * 1024)
+        config.urlCache = imageCache
         config.requestCachePolicy = .returnCacheDataElseLoad
         config.timeoutIntervalForRequest = 25
-        config.httpMaximumConnectionsPerHost = 8
-        config.waitsForConnectivity = true
+        config.httpMaximumConnectionsPerHost = 6
+        config.waitsForConnectivity = false
         session = URLSession(configuration: config)
     }
 
@@ -73,15 +83,33 @@ final class ImagePipeline: @unchecked Sendable {
     func prefetch(_ urls: [URL], maxPixel: CGFloat) {
         guard !lowData, !videoActive else { return }
         var seen = Set<String>()
+        var queued = 0
         for url in urls where seen.insert(url.absoluteString).inserted {
             guard cached(url, maxPixel: maxPixel) == nil else { continue }
-            if seen.count > 40 { break }
-            Task.detached(priority: .utility) { _ = await self.load(url, maxPixel: maxPixel) }
+            prefetchLock.lock()
+            let busy = prefetchBudget
+            if busy >= 6 { prefetchLock.unlock(); break }
+            prefetchBudget += 1
+            prefetchLock.unlock()
+            queued += 1
+            if queued > 24 { break }
+            Task.detached(priority: .utility) {
+                _ = await self.load(url, maxPixel: maxPixel)
+                self.prefetchLock.lock()
+                self.prefetchBudget = max(0, self.prefetchBudget - 1)
+                self.prefetchLock.unlock()
+            }
         }
     }
 
     func clearMemory() {
         memory.removeAllObjects()
+    }
+
+    /// Borra memoria + disco de pósteres / backdrops.
+    func clearAll() {
+        memory.removeAllObjects()
+        imageCache.removeAllCachedResponses()
     }
 
     private static func downsample(_ data: Data, maxPixel: CGFloat) -> UIImage? {

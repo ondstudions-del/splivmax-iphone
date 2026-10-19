@@ -68,13 +68,16 @@ final class APIClient: @unchecked Sendable {
     }
 
     private init() {
-        cache = URLCache(memoryCapacity: 8 * 1024 * 1024, diskCapacity: 40 * 1024 * 1024)
+        // HTTP cache del sistema + caché propia de JSON (ResponseCache).
+        cache = URLCache(memoryCapacity: 24 * 1024 * 1024, diskCapacity: 120 * 1024 * 1024)
+        URLCache.shared = cache
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 60
         config.requestCachePolicy = .useProtocolCachePolicy
         config.urlCache = cache
         config.httpMaximumConnectionsPerHost = 6
+        config.waitsForConnectivity = false
         config.httpAdditionalHeaders = [
             "Accept": "application/json",
             "Accept-Language": "es",
@@ -87,6 +90,12 @@ final class APIClient: @unchecked Sendable {
     /// Las respuestas dependen de la cuenta y del perfil: al cambiar de sesión se descarta la caché.
     func clearCache() {
         cache.removeAllCachedResponses()
+        ResponseCache.shared.clear()
+    }
+
+    /// Ámbito de caché por perfil (evita mezclar catálogos).
+    func setCacheScope(_ scope: String) {
+        ResponseCache.shared.scope = scope
     }
 
     func send<T: Decodable>(_ method: Method = .get, _ path: String, query: [String: String] = [:],
@@ -100,17 +109,68 @@ final class APIClient: @unchecked Sendable {
                                 body: [String: Any]? = nil, authorized: Bool = true,
                                 timeout: TimeInterval? = nil,
                                 as type: T.Type = T.self) async throws -> (data: T, meta: PageMeta?) {
+        let resolved = Self.resolvePath(path)
+        let cacheTTL = method == .get ? ResponseCache.ttl(for: resolved) : nil
+        let cacheKey: String? = cacheTTL.map {
+            ResponseCache.shared.key(path: resolved, query: query, authorized: authorized, tokenHint: token)
+        }
+
+        if let cacheKey, let ttl = cacheTTL, let entry = ResponseCache.shared.entry(for: cacheKey) {
+            let online = await MainActor.run { NetworkMonitor.shared.isOnline }
+            if entry.isFresh, let decoded = try? decodeSuccess(entry.data, as: T.self) {
+                if entry.age > ttl * 0.5, online {
+                    Task { [weak self] in
+                        _ = try? await self?.fetchAndStore(
+                            method, path, query: query, body: body,
+                            authorized: authorized, timeout: timeout,
+                            cacheKey: cacheKey, cacheTTL: ttl, as: T.self,
+                        )
+                    }
+                }
+                return decoded
+            }
+            if !online, entry.isUsableOffline, let decoded = try? decodeSuccess(entry.data, as: T.self) {
+                return decoded
+            }
+        }
+
+        do {
+            return try await fetchAndStore(
+                method, path, query: query, body: body,
+                authorized: authorized, timeout: timeout,
+                cacheKey: cacheKey, cacheTTL: cacheTTL, as: T.self,
+            )
+        } catch {
+            if let cacheKey,
+               let entry = ResponseCache.shared.entry(for: cacheKey),
+               entry.isUsableOffline,
+               let decoded = try? decodeSuccess(entry.data, as: T.self) {
+                return decoded
+            }
+            throw error
+        }
+    }
+
+    private func fetchAndStore<T: Decodable>(
+        _ method: Method, _ path: String, query: [String: String],
+        body: [String: Any]?, authorized: Bool, timeout: TimeInterval?,
+        cacheKey: String?, cacheTTL: TimeInterval?,
+        as type: T.Type,
+    ) async throws -> (data: T, meta: PageMeta?) {
         var request = try makeRequest(method, path, query: query, body: body, authorized: authorized)
         if let timeout {
             request.timeoutInterval = timeout
         }
-        // Playback y arranques: 1 reintento rápido; resto: hasta 2.
         let maxAttempts = path.hasPrefix("/playback/") ? 2 : 3
         var attempt = 0
         while true {
             do {
                 let (data, response) = try await session.data(for: request)
-                return try handle(data: data, response: response, as: T.self)
+                let decoded = try handle(data: data, response: response, as: T.self)
+                if let cacheKey, let cacheTTL, (200..<300).contains((response as? HTTPURLResponse)?.statusCode ?? 0) {
+                    ResponseCache.shared.store(key: cacheKey, data: data, ttl: cacheTTL)
+                }
+                return decoded
             } catch let error as APIError {
                 throw error
             } catch is CancellationError {
@@ -161,7 +221,13 @@ final class APIClient: @unchecked Sendable {
 
     /// Alias de rutas antiguas de la app → rutas reales de /v1.
     private static func resolvePath(_ path: String) -> String {
-        if path.hasPrefix("/titles/") { return "/title/" + path.dropFirst("/titles/".count) }
+        // Solo /titles/{id} → /title/{id}. NO reescribir /titles/{id}/comments (provocaba 404).
+        if path.hasPrefix("/titles/") {
+            let rest = String(path.dropFirst("/titles/".count))
+            if !rest.contains("/") {
+                return "/title/" + rest
+            }
+        }
         if path == "/my-list" { return "/favorites" }
         if path == "/playback/progress" { return "/playback/progress" }
         return path

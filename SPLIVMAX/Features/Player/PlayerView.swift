@@ -59,7 +59,7 @@ struct PlayerView: View {
                 if showLoadingScreen {
                     PlayerLoadingView(title: controller.data?.title.title ?? request.title,
                                       subtitle: controller.data?.episode?.label,
-                                      backdrop: controller.data?.title.backdrop ?? request.artworkURL,
+                                      backdrop: controller.data?.title.backdrop,
                                       status: loadingStatus,
                                       offline: controller.waitingForNetwork,
                                       bitsPerSecond: controller.throughput)
@@ -140,20 +140,16 @@ struct PlayerView: View {
         .onAppear {
             OrientationController.setLandscape(true)
             originalBrightness = ScreenBrightness.value
-            UIApplication.shared.isIdleTimerDisabled = true
             scheduleHide()
         }
         .task { await controller.start() }
         .onDisappear {
             hideTask?.cancel()
-            UIApplication.shared.isIdleTimerDisabled = false
             controller.close()
             if let originalBrightness { ScreenBrightness.value = originalBrightness }
             OrientationController.setLandscape(false)
             coordinator.didClose()
-            if NetworkMonitor.shared.isOnline {
-                Task { await session.refreshMe() }
-            }
+            Task { await session.refreshMe() }
         }
         .onChange(of: preloadOnWiFi) { _ in controller.refreshBuffer() }
         .onChange(of: controller.isPlaying) { playing in
@@ -181,9 +177,7 @@ struct PlayerView: View {
 
     private var loadingStatus: String {
         if controller.waitingForNetwork { return "Sin conexión" }
-        if controller.data == nil { return "Conectando…" }
-        if controller.isBuffering { return "Preparando vídeo…" }
-        return "Cargando…"
+        return controller.data == nil ? "Conectando…" : "Cargando…"
     }
 
     // MARK: Gestos
@@ -688,12 +682,11 @@ private struct PlayerLoadingView: View {
         ZStack {
             Color.black
             if let backdrop {
-                RemoteImage(backdrop, maxPixel: 1400)
-                    .opacity(0.85)
-                LinearGradient(colors: [.clear, .black.opacity(0.55), .black.opacity(0.92)], startPoint: .top, endPoint: .bottom)
-            } else {
-                LinearGradient(colors: [Color.black.opacity(0.35), Color.black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+                RemoteImage(backdrop, maxPixel: 1200)
+                    .blur(radius: 16)
+                    .opacity(0.4)
             }
+            LinearGradient(colors: [Color.black.opacity(0.35), Color.black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
 
             VStack(spacing: 18) {
                 ZStack {

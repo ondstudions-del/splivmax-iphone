@@ -52,16 +52,76 @@ final class TitleDetailModel: ObservableObject {
         commentsTotal = r.meta?.total ?? comments.count
     }
 
-    func post(comment body: String) async throws {
-        let c: Comment = try await APIClient.shared.send(.post, "/titles/\(id)/comments", body: ["body": body])
-        comments.insert(c, at: 0)
-        commentsTotal += 1
+    func refreshAll() async {
+        await load()
+        await loadComments(reset: true)
+    }
+
+    func post(comment body: String, parentId: String? = nil) async throws {
+        var payload: [String: Any] = ["body": body]
+        if let parentId, !parentId.isEmpty { payload["parent_id"] = parentId }
+        let c: Comment = try await APIClient.shared.send(.post, "/titles/\(id)/comments", body: payload)
+        if let parentId, !parentId.isEmpty {
+            if let idx = comments.firstIndex(where: { $0.id == parentId }) {
+                var parent = comments[idx]
+                if !parent.replies.contains(where: { $0.id == c.id }) {
+                    parent.replies.append(c)
+                    parent.repliesCount = parent.replies.count
+                }
+                comments[idx] = parent
+            } else {
+                await loadComments(reset: true)
+            }
+        } else {
+            comments.insert(c, at: 0)
+            commentsTotal += 1
+        }
+    }
+
+    func vote(_ comment: Comment, vote: String) async throws {
+        let updated: Comment = try await APIClient.shared.send(
+            .post,
+            "/titles/\(id)/comments/\(comment.id)/vote",
+            body: ["vote": vote]
+        )
+        applyVote(updated)
+    }
+
+    private func applyVote(_ updated: Comment) {
+        if let idx = comments.firstIndex(where: { $0.id == updated.id }) {
+            var row = comments[idx]
+            row.likes = updated.likes
+            row.dislikes = updated.dislikes
+            row.myVote = updated.myVote
+            comments[idx] = row
+            return
+        }
+        for i in comments.indices {
+            guard let rIdx = comments[i].replies.firstIndex(where: { $0.id == updated.id }) else { continue }
+            var parent = comments[i]
+            parent.replies[rIdx].likes = updated.likes
+            parent.replies[rIdx].dislikes = updated.dislikes
+            parent.replies[rIdx].myVote = updated.myVote
+            comments[i] = parent
+            return
+        }
     }
 
     func delete(_ comment: Comment) async throws {
         let _: [String: Bool] = try await APIClient.shared.send(.post, "/titles/\(id)/comments/\(comment.id)/delete")
-        comments.removeAll { $0.id == comment.id }
-        commentsTotal = max(0, commentsTotal - 1)
+        if let idx = comments.firstIndex(where: { $0.id == comment.id }) {
+            commentsTotal = max(0, commentsTotal - 1)
+            comments.remove(at: idx)
+            return
+        }
+        for i in comments.indices {
+            guard comments[i].replies.contains(where: { $0.id == comment.id }) else { continue }
+            var parent = comments[i]
+            parent.replies.removeAll { $0.id == comment.id }
+            parent.repliesCount = parent.replies.count
+            comments[i] = parent
+            return
+        }
     }
 }
 
@@ -164,6 +224,7 @@ struct TitleDetailView: View {
                 }
             }
         }
+        .refreshable { await model.refreshAll() }
         .task(id: session.contentVersion) { await model.load() }
         .onChange(of: player.closedCount) { _ in Task { await model.load() } }
         .sheet(isPresented: $reporting) {
@@ -499,7 +560,8 @@ struct EpisodeRow: View {
             Button(action: onPlay) {
                 HStack(alignment: .top, spacing: 12) {
                     ZStack {
-                        RemoteImage(episode.thumbnail, maxPixel: 400, placeholderIcon: "play.rectangle")
+                        // iOS no renderiza SVG: si el thumb es placeholder, usar póster de la serie.
+                        RemoteImage(episode.artURL(fallback: poster), maxPixel: 400, placeholderIcon: "play.rectangle")
                         if episode.playable {
                             Image(systemName: "play.fill")
                                 .font(.system(size: 13, weight: .bold))
@@ -556,7 +618,7 @@ struct EpisodeRow: View {
                     episodeId: episode.id,
                     displayTitle: seriesTitle,
                     subtitle: "E\(episode.number ?? 0). \(episode.title)",
-                    poster: episode.thumbnail ?? poster,
+                    poster: episode.artURL(fallback: poster),
                     isEpisode: true,
                     compact: true
                 )
@@ -592,6 +654,10 @@ private struct CommentsSection: View {
     @State private var sending = false
     @State private var error: String?
     @State private var deleting: Comment?
+    @State private var replyTo: Comment?
+    @State private var replyText = ""
+    @State private var replySending = false
+    @State private var replyError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -600,20 +666,14 @@ private struct CommentsSection: View {
                 .foregroundColor(Theme.text)
 
             if session.isLoggedIn {
-                VStack(alignment: .trailing, spacing: 8) {
-                    TextField("Escribe un comentario…", text: $text, axis: .vertical)
-                        .lineLimit(2...5)
-                        .padding(12)
-                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).stroke(Theme.line, lineWidth: 1))
-                        .foregroundColor(Theme.text)
-                    if let error { InlineError(message: error) }
-                    Button(action: send) {
-                        if sending { ProgressView().tint(.white) } else { Text("Publicar") }
-                    }
-                    .buttonStyle(PrimaryButtonStyle(fullWidth: false))
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 || sending)
-                }
+                composer(
+                    placeholder: "Escribe un comentario…",
+                    text: $text,
+                    error: error,
+                    sending: sending,
+                    actionTitle: "Publicar",
+                    send: sendRoot
+                )
             } else {
                 Button("Inicia sesión para comentar") { _ = session.requireLogin() }
                     .buttonStyle(SecondaryButtonStyle())
@@ -624,31 +684,58 @@ private struct CommentsSection: View {
             }
 
             ForEach(model.comments) { c in
-                HStack(alignment: .top, spacing: 10) {
-                    AvatarView(url: c.avatarUrl, size: 34, name: c.author)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(c.author).font(.system(size: 14, weight: .bold)).foregroundColor(Theme.text)
-                            if let when = ISODate.relative(c.createdAt) {
-                                Text(when).font(.system(size: 12)).foregroundColor(Theme.muted)
-                            }
-                            Spacer()
-                            if c.canDelete {
-                                Button { deleting = c } label: {
-                                    Image(systemName: "trash").font(.system(size: 13)).foregroundColor(Theme.muted)
-                                }
-                                .accessibilityLabel(Text("Borrar comentario"))
-                            }
-                        }
-                        Text(c.body)
-                            .font(.system(size: 14.5))
-                            .foregroundColor(Theme.text2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .padding(.vertical, 6)
+                CommentBubble(
+                    comment: c,
+                    indented: false,
+                    onLike: { vote(c, "like") },
+                    onDislike: { vote(c, "dislike") },
+                    onReply: {
+                        guard session.isLoggedIn || session.requireLogin() else { return }
+                        replyTo = c
+                        replyText = ""
+                        replyError = nil
+                    },
+                    onDelete: { deleting = c }
+                )
                 .onAppear {
                     if c.id == model.comments.last?.id { Task { await model.loadComments(reset: false) } }
+                }
+
+                ForEach(c.replies) { reply in
+                    CommentBubble(
+                        comment: reply,
+                        indented: true,
+                        onLike: { vote(reply, "like") },
+                        onDislike: { vote(reply, "dislike") },
+                        onReply: {
+                            guard session.isLoggedIn || session.requireLogin() else { return }
+                            replyTo = c
+                            replyText = "@\(reply.author) "
+                            replyError = nil
+                        },
+                        onDelete: { deleting = reply }
+                    )
+                }
+
+                if replyTo?.id == c.id {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Respondiendo a \(c.author)")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundColor(Theme.accent2)
+                        composer(
+                            placeholder: "Escribe una respuesta…",
+                            text: $replyText,
+                            error: replyError,
+                            sending: replySending,
+                            actionTitle: "Responder",
+                            send: sendReply
+                        )
+                        Button("Cancelar") { replyTo = nil; replyText = ""; replyError = nil }
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Theme.muted)
+                    }
+                    .padding(.leading, 44)
+                    .padding(.bottom, 4)
                 }
             }
         }
@@ -662,7 +749,25 @@ private struct CommentsSection: View {
         }
     }
 
-    private func send() {
+    @ViewBuilder
+    private func composer(placeholder: String, text: Binding<String>, error: String?, sending: Bool, actionTitle: String, send: @escaping () -> Void) -> some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            TextField(placeholder, text: text, axis: .vertical)
+                .lineLimit(2...5)
+                .padding(12)
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).stroke(Theme.line, lineWidth: 1))
+                .foregroundColor(Theme.text)
+            if let error { InlineError(message: error) }
+            Button(action: send) {
+                if sending { ProgressView().tint(.white) } else { Text(actionTitle) }
+            }
+            .buttonStyle(PrimaryButtonStyle(fullWidth: false))
+            .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 || sending)
+        }
+    }
+
+    private func sendRoot() {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         sending = true
         error = nil
@@ -676,6 +781,108 @@ private struct CommentsSection: View {
             }
             sending = false
         }
+    }
+
+    private func sendReply() {
+        guard let parent = replyTo else { return }
+        let body = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        replySending = true
+        replyError = nil
+        Task {
+            do {
+                try await model.post(comment: body, parentId: parent.id)
+                replyText = ""
+                replyTo = nil
+                Haptics.success()
+            } catch {
+                replyError = APIError.from(error).message
+            }
+            replySending = false
+        }
+    }
+
+    private func vote(_ comment: Comment, _ value: String) {
+        guard session.isLoggedIn || session.requireLogin() else { return }
+        Task {
+            do {
+                try await model.vote(comment, vote: value)
+                Haptics.light()
+            } catch {
+                session.show(APIError.from(error).message, .error)
+            }
+        }
+    }
+}
+
+private struct CommentBubble: View {
+    let comment: Comment
+    var indented = false
+    let onLike: () -> Void
+    let onDislike: () -> Void
+    let onReply: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if indented { Color.clear.frame(width: 34) }
+            AvatarView(url: comment.avatarUrl, size: indented ? 28 : 34, name: comment.author)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(comment.author).font(.system(size: 14, weight: .bold)).foregroundColor(Theme.text)
+                    if let when = ISODate.relative(comment.createdAt) {
+                        Text(when).font(.system(size: 12)).foregroundColor(Theme.muted)
+                    }
+                    Spacer()
+                    if comment.canDelete {
+                        Button(action: onDelete) {
+                            Image(systemName: "trash").font(.system(size: 13)).foregroundColor(Theme.muted)
+                        }
+                        .accessibilityLabel(Text("Borrar comentario"))
+                    }
+                }
+                Text(comment.body)
+                    .font(.system(size: 14.5))
+                    .foregroundColor(Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 14) {
+                    voteButton(
+                        system: comment.myVote == 1 ? "hand.thumbsup.fill" : "hand.thumbsup",
+                        count: comment.likes,
+                        active: comment.myVote == 1,
+                        action: onLike
+                    )
+                    voteButton(
+                        system: comment.myVote == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown",
+                        count: comment.dislikes,
+                        active: comment.myVote == -1,
+                        action: onDislike
+                    )
+                    Button(action: onReply) {
+                        Text("Responder")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundColor(Theme.accent2)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func voteButton(system: String, count: Int, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: system)
+                    .font(.system(size: 13, weight: .semibold))
+                if count > 0 {
+                    Text("\(count)").font(.system(size: 12.5, weight: .semibold))
+                }
+            }
+            .foregroundColor(active ? Theme.accent2 : Theme.muted)
+        }
+        .buttonStyle(.plain)
     }
 }
 
