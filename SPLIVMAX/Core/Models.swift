@@ -1111,6 +1111,7 @@ struct PlaybackData: Decodable {
     let preferredSubtitle: String?
     let settings: PlaybackSettings
     let expiresIn: Int
+    let intro: PlaybackIntro?
 
     init(
         streamId: String,
@@ -1122,8 +1123,10 @@ struct PlaybackData: Decodable {
         resume: Int,
         preferredSubtitle: String?,
         settings: PlaybackSettings,
-        expiresIn: Int
+        expiresIn: Int,
+        intro: PlaybackIntro? = nil
     ) {
+        self.intro = intro
         self.streamId = streamId
         self.title = title
         self.episode = episode
@@ -1139,7 +1142,7 @@ struct PlaybackData: Decodable {
     var isOffline: Bool { streamId == "offline" }
 
     enum CodingKeys: String, CodingKey {
-        case streamId, title, episode, next, sources, subtitles, resume, preferredSubtitle, settings, expiresIn
+        case streamId, title, episode, next, sources, subtitles, resume, preferredSubtitle, settings, expiresIn, intro
     }
 
     init(from decoder: Decoder) throws {
@@ -1155,6 +1158,36 @@ struct PlaybackData: Decodable {
         settings = (try? c.decode(PlaybackSettings.self, forKey: .settings))
             ?? PlaybackSettings(autoplayNext: true, countdown: 10, interval: 15)
         expiresIn = c.flexInt(.expiresIn) ?? 0
+        intro = try? c.decodeIfPresent(PlaybackIntro.self, forKey: .intro)
+    }
+}
+
+/// Intro de marca que se reproduce antes de cada película o episodio (MP4 H.264 servido por la web).
+struct PlaybackIntro: Decodable {
+    let url: URL
+    let lightURL: URL
+
+    private struct Variant: Decodable {
+        let quality: Int?
+        let src: String?
+    }
+
+    enum CodingKeys: String, CodingKey { case src, sources }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let variants = ((try? c.decode([Variant].self, forKey: .sources)) ?? [])
+            .compactMap { v -> (Int, URL)? in
+                guard let s = v.src, let u = URL(string: s) else { return nil }
+                return (v.quality ?? 0, u)
+            }
+            .sorted { $0.0 > $1.0 }
+        let fallback = (try? c.decode(String.self, forKey: .src)).flatMap(URL.init(string:))
+        guard let best = variants.first?.1 ?? fallback else {
+            throw DecodingError.dataCorruptedError(forKey: .src, in: c, debugDescription: "Intro sin URL")
+        }
+        url = best
+        lightURL = variants.last?.1 ?? best
     }
 }
 
