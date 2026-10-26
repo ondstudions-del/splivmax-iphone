@@ -24,6 +24,10 @@ final class PlayerCoordinator: ObservableObject {
     /// Aumenta al cerrar el reproductor: las fichas recargan el progreso.
     @Published private(set) var closedCount = 0
 
+    init() {
+        IntroCache.prefetch()
+    }
+
     func play(titleId: String, episodeId: String? = nil, title: String,
               localFileURL: URL? = nil, isMatroska: Bool = false) {
         request = PlayRequest(
@@ -37,6 +41,56 @@ final class PlayerCoordinator: ObservableObject {
 
     func didClose() {
         closedCount += 1
+    }
+}
+
+/// La intro de marca se descarga una vez y se reproduce desde el iPhone (arranca al instante y sin gastar datos).
+@MainActor
+enum IntroCache {
+    private static let defaultRemote = AppConfig.webURL.appendingPathComponent("assets/video/intro-1080.mp4")
+    private static let versionKey = "spx.intro.version"
+    private static var downloading = false
+
+    private static var file: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Intro", isDirectory: true)
+            .appendingPathComponent("intro.mp4")
+    }
+
+    static var localFile: URL? {
+        let f = file
+        return FileManager.default.fileExists(atPath: f.path) ? f : nil
+    }
+
+    /// Descarga la intro en segundo plano si falta o si el servidor publicó otra versión.
+    static func prefetch(_ remote: URL? = nil) {
+        let url = remote ?? defaultRemote
+        let version = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "v" }?.value
+        if localFile != nil && (version == nil || version == UserDefaults.standard.string(forKey: versionKey)) { return }
+        guard !downloading else { return }
+        downloading = true
+        let target = file
+        URLSession.shared.downloadTask(with: url) { tmp, response, _ in
+            var saved = false
+            if let tmp, (response as? HTTPURLResponse)?.statusCode == 200 {
+                let fm = FileManager.default
+                let staging = target.appendingPathExtension("part")
+                try? fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? fm.removeItem(at: staging)
+                if (try? fm.moveItem(at: tmp, to: staging)) != nil {
+                    try? fm.removeItem(at: target)
+                    saved = (try? fm.moveItem(at: staging, to: target)) != nil
+                    var stored = target
+                    var values = URLResourceValues()
+                    values.isExcludedFromBackup = true
+                    try? stored.setResourceValues(values)
+                }
+            }
+            Task { @MainActor in
+                downloading = false
+                if saved { UserDefaults.standard.set(version ?? "", forKey: versionKey) }
+            }
+        }.resume()
     }
 }
 
@@ -107,6 +161,7 @@ final class PlayerController: NSObject, ObservableObject {
     let introPlayer = AVPlayer()
     @Published private(set) var introVisible = false
     private var introActive = false
+    private var introUserPaused = false
     private var introPending = true
     private var introBag = Set<AnyCancellable>()
     private var introTimeObserver: Any?
@@ -289,14 +344,19 @@ final class PlayerController: NSObject, ObservableObject {
     /// El contenido se carga en pausa (como una pausa pedida) mientras suena la intro.
     private func beginIntro(_ intro: PlaybackIntro) {
         endIntroNow()
-        let item = AVPlayerItem(url: network.isWiFi && !lowData ? intro.url : intro.lightURL)
+        let local = IntroCache.localFile
+        IntroCache.prefetch(intro.url)
+        let item = AVPlayerItem(url: local ?? (network.isWiFi && !lowData ? intro.url : intro.lightURL))
         introActive = true
+        introUserPaused = false
         introVisible = true
         userPaused = true
         introPlayer.isMuted = false
         introPlayer.volume = 1
+        introPlayer.automaticallyWaitsToMinimizeStalling = local == nil
         introPlayer.replaceCurrentItem(with: item)
         introPlayer.play()
+        isPlaying = true
         NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: item)
             .merge(with: NotificationCenter.default.publisher(for: AVPlayerItem.failedToPlayToEndTimeNotification, object: item))
             .receive(on: DispatchQueue.main)
@@ -312,12 +372,12 @@ final class PlayerController: NSObject, ObservableObject {
             let seconds = time.seconds
             Task { @MainActor in self?.introTick(seconds) }
         }
+        // Si la intro aún no está en el iPhone y tarda en llegar, no se hace esperar: empieza el contenido.
+        let startLimit: UInt64 = local == nil ? 3_000_000_000 : 4_000_000_000
         introTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
-            guard let self, self.introActive else { return }
-            if self.introPlayer.currentTime().seconds < 0.5 { self.finishIntro(); return }
-            try? await Task.sleep(nanoseconds: 10_000_000_000)
-            if self.introActive { self.finishIntro() }
+            try? await Task.sleep(nanoseconds: startLimit)
+            guard let self, self.introActive, !self.introUserPaused else { return }
+            if self.introPlayer.currentTime().seconds < 0.3 { self.finishIntro() }
         }
     }
 
@@ -340,6 +400,7 @@ final class PlayerController: NSObject, ObservableObject {
             endIntroNow()
             return
         }
+        isPlaying = false
         play()
         introTask = Task { @MainActor [weak self] in
             for _ in 0..<40 {
@@ -363,6 +424,7 @@ final class PlayerController: NSObject, ObservableObject {
         introBag = []
         if let o = introTimeObserver { introPlayer.removeTimeObserver(o) }
         introTimeObserver = nil
+        if introActive { isPlaying = false }
         introActive = false
         introVisible = false
         introPlayer.pause()
@@ -804,6 +866,12 @@ final class PlayerController: NSObject, ObservableObject {
     // MARK: Controles
 
     func play() {
+        if introActive {
+            introUserPaused = false
+            introPlayer.play()
+            isPlaying = true
+            return
+        }
         userPaused = false
         if usesVLC {
             if phase == .ended {
@@ -826,6 +894,12 @@ final class PlayerController: NSObject, ObservableObject {
 
     func pause() {
         userPaused = true
+        if introActive {
+            introUserPaused = true
+            introPlayer.pause()
+            isPlaying = false
+            return
+        }
         if usesVLC {
             vlc.pause()
             isPlaying = false
@@ -850,6 +924,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     func seek(to seconds: Double, precise: Bool = true) {
+        guard !introActive else { return }
         let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
         currentTime = target
         if target < duration - Double(data?.settings.countdown ?? 10) - 1 { nextCountdown = nil }
