@@ -29,6 +29,13 @@ final class VLCPlayerEngine: NSObject, ObservableObject {
     let drawableView = UIView()
 #endif
 
+    /// Algunos servidores IPTV responden 403 a cualquier agente que contenga «VLC»
+    /// (el de libVLC por defecto es «VLC/3.x LibVLC/3.x»), así que no debe aparecer esa palabra.
+    static let userAgent: String = {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0"
+        return "SPLIVMAX-iOS/\(version) (iPhone; iOS \(UIDevice.current.systemVersion))"
+    }()
+
     private var tick: Timer?
     private var pendingSeek: Double?
     private var opened = false
@@ -53,6 +60,8 @@ final class VLCPlayerEngine: NSObject, ObservableObject {
             "network-caching": 1500,
             "file-caching": 1500,
             "live-caching": 1500,
+            "http-user-agent": Self.userAgent,
+            "http-reconnect": true,
         ])
         mediaPlayer.media = media
         mediaPlayer.play()
@@ -165,7 +174,7 @@ extension VLCPlayerEngine: VLCMediaPlayerDelegate {
             case .buffering:
                 self.isBuffering = true
             case .error:
-                self.failedMessage = "No se pudo abrir el archivo de vídeo (MKV)."
+                self.failedMessage = "No se pudo abrir el vídeo."
                 self.isBuffering = false
             case .ended, .stopped:
                 self.isPlaying = false
