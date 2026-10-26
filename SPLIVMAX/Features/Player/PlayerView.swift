@@ -47,6 +47,12 @@ struct PlayerView: View {
                     .ignoresSafeArea()
                 }
 
+                PlayerLayerView(player: controller.introPlayer, gravity: .resizeAspect) { _ in }
+                    .ignoresSafeArea()
+                    .opacity(controller.introVisible ? 1 : 0)
+                    .allowsHitTesting(false)
+                    .animation(.easeOut(duration: 0.8), value: controller.introVisible)
+
                 VolumeHost(controller: volume)
                     .frame(width: 1, height: 1)
                     .opacity(0.01)
@@ -65,7 +71,7 @@ struct PlayerView: View {
                                       bitsPerSecond: controller.throughput)
                         .allowsHitTesting(false)
                         .transition(.opacity)
-                } else if controller.isBuffering && !isFailed && controller.phase != .ended {
+                } else if controller.isBuffering && !controller.introVisible && !isFailed && controller.phase != .ended {
                     VStack(spacing: 18) {
                         ProgressView()
                             .tint(.white)
@@ -127,12 +133,6 @@ struct PlayerView: View {
                 if controller.phase == .ended {
                     endedView
                 }
-
-                PlayerLayerView(player: controller.introPlayer, gravity: .resizeAspect) { _ in }
-                    .ignoresSafeArea()
-                    .opacity(controller.introVisible ? 1 : 0)
-                    .allowsHitTesting(controller.introVisible)
-                    .animation(.easeOut(duration: 0.8), value: controller.introVisible)
             }
             .animation(.easeOut(duration: 0.35), value: showLoadingScreen)
             .animation(.easeOut(duration: 0.25), value: controlsVisible)
@@ -178,7 +178,7 @@ struct PlayerView: View {
 
     /// Pantalla «Cargando» desde que se entra al reproductor hasta que se ve el primer fotograma.
     private var showLoadingScreen: Bool {
-        !controller.hasVideo && !isFailed && controller.phase != .ended
+        !controller.hasVideo && !controller.introVisible && !isFailed && controller.phase != .ended
     }
 
     private var loadingStatus: String {
@@ -290,7 +290,7 @@ struct PlayerView: View {
             VStack(spacing: 0) {
                 topBar
                 Spacer()
-                if controller.hasVideo {
+                if controller.hasVideo || controller.introVisible {
                     centerControls
                     Spacer()
                     bottomBar
