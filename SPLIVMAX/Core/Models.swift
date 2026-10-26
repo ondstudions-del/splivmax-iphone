@@ -1163,6 +1163,108 @@ struct HeartbeatResponse: Decodable {
     let completed: Bool
 }
 
+// MARK: - TV en vivo
+
+private func nonEmpty(_ value: String?) -> String? {
+    guard let v = value?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty else { return nil }
+    return v
+}
+
+/// Canal en directo (M3U8). El número lo asigna el servidor y empieza en 100.
+struct LiveChannel: Decodable, Identifiable, Hashable {
+    let id: String
+    var number: Int
+    let name: String
+    let category: String
+    let logo: URL?
+    let adult: Bool
+    let epgNow: String?
+    let epgNext: String?
+
+    enum CodingKeys: String, CodingKey { case id, number, name, category, logo, adult, epgNow, epgNext }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? c.flexInt(.id).map { String($0) } ?? UUID().uuidString
+        number = c.flexInt(.number) ?? 0
+        name = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .name)) ?? "Canal"
+        category = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .category)) ?? ""
+        logo = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .logo)).flatMap { URL(string: $0) }
+        adult = (try? c.decode(Bool.self, forKey: .adult)) ?? ((c.flexInt(.adult) ?? 0) != 0)
+        epgNow = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .epgNow))
+        epgNext = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .epgNext))
+    }
+}
+
+struct LiveCategory: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let adult: Bool
+    var channels: [LiveChannel]
+
+    enum CodingKeys: String, CodingKey { case id, name, adult, channels }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? c.flexInt(.id).map { String($0) } ?? UUID().uuidString
+        name = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .name)) ?? "Canales"
+        adult = (try? c.decode(Bool.self, forKey: .adult)) ?? false
+        channels = (try? c.decode([LiveChannel].self, forKey: .channels)) ?? []
+    }
+}
+
+struct LiveTvData: Decodable {
+    let enabled: Bool
+    let canPlay: Bool
+    let message: String?
+    let categories: [LiveCategory]
+    /// Todos los canales ordenados por número (lista para el zapping).
+    let channels: [LiveChannel]
+
+    enum CodingKeys: String, CodingKey { case enabled, canPlay, message, categories }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = (try? c.decode(Bool.self, forKey: .enabled)) ?? true
+        canPlay = (try? c.decode(Bool.self, forKey: .canPlay)) ?? false
+        message = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .message))
+        var cats = (try? c.decode([LiveCategory].self, forKey: .categories)) ?? []
+        var seen = Set<String>()
+        var all: [LiveChannel] = []
+        for cat in cats {
+            for ch in cat.channels where seen.insert(ch.id).inserted { all.append(ch) }
+        }
+        all.sort { $0.number < $1.number }
+        // Un servidor antiguo sin numeración: se numera aquí desde el 100 para no mostrar nunca un canal 10 o 99.
+        if all.contains(where: { $0.number < 100 }) {
+            for i in all.indices { all[i].number = 100 + i }
+            let numbers = Dictionary(all.map { ($0.id, $0.number) }, uniquingKeysWith: { a, _ in a })
+            for i in cats.indices {
+                for j in cats[i].channels.indices {
+                    cats[i].channels[j].number = numbers[cats[i].channels[j].id] ?? cats[i].channels[j].number
+                }
+            }
+        }
+        categories = cats
+        channels = all
+    }
+}
+
+struct LiveStream: Decodable {
+    let id: String
+    let url: String
+    let epgNow: String?
+
+    enum CodingKeys: String, CodingKey { case id, url, epgNow }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        url = (try? c.decode(String.self, forKey: .url)) ?? ""
+        epgNow = nonEmpty(try? c.decodeIfPresent(String.self, forKey: .epgNow))
+    }
+}
+
 // MARK: - Configuración del servidor
 
 struct ServerConfig: Decodable {

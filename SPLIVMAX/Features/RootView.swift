@@ -148,7 +148,7 @@ struct RootView: View {
 // MARK: - Pestañas
 
 enum AppTab: Hashable, CaseIterable {
-    case home, series, movies, search, account
+    case home, channels, movies, search, account
 }
 
 struct MainTabView: View {
@@ -184,7 +184,7 @@ struct MainTabView: View {
     private func root(_ item: AppTab) -> some View {
         switch item {
         case .home: HomeView(openTab: select)
-        case .series: CatalogView(type: "series")
+        case .channels: ChannelsView()
         case .movies: CatalogView(type: "movie")
         case .search: SearchView()
         case .account: AccountView()
@@ -218,7 +218,7 @@ struct TabBar: View {
     var body: some View {
         HStack(spacing: 0) {
             item(.home, "Inicio", "house", "house.fill")
-            item(.series, "Series", "tv", "tv.fill")
+            item(.channels, "Canales", "play.tv", "play.tv.fill")
             item(.movies, "Películas", "film", "film.fill")
             item(.search, "Buscar", "magnifyingglass", "magnifyingglass")
             accountItem
