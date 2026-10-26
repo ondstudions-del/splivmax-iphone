@@ -103,6 +103,14 @@ final class PlayerController: NSObject, ObservableObject {
 
     let player = AVPlayer()
     let vlc = VLCPlayerEngine()
+    /// Intro de marca: se ve encima mientras el contenido se precarga en pausa.
+    let introPlayer = AVPlayer()
+    @Published private(set) var introVisible = false
+    private var introActive = false
+    private var introPending = true
+    private var introBag = Set<AnyCancellable>()
+    private var introTimeObserver: Any?
+    private var introTask: Task<Void, Never>?
     private(set) var request: PlayRequest
     private let api = APIClient.shared
     private let network = NetworkMonitor.shared
@@ -208,6 +216,10 @@ final class PlayerController: NSObject, ObservableObject {
                 fail(message: "Este contenido todavía no tiene una fuente de vídeo disponible.", code: "no_source")
                 return
             }
+            if introPending, let intro = d.intro {
+                introPending = false
+                beginIntro(intro)
+            }
             load(first, at: Double(d.resume))
             selectInitialSubtitle(d)
             loadArtwork(d.title.backdrop)
@@ -270,6 +282,91 @@ final class PlayerController: NSObject, ObservableObject {
         candidates = [source]
         candidateIndex = 0
         load(source, at: 0)
+    }
+
+    // MARK: Intro
+
+    /// El contenido se carga en pausa (como una pausa pedida) mientras suena la intro.
+    private func beginIntro(_ intro: PlaybackIntro) {
+        endIntroNow()
+        let item = AVPlayerItem(url: network.isWiFi && !lowData ? intro.url : intro.lightURL)
+        introActive = true
+        introVisible = true
+        userPaused = true
+        introPlayer.isMuted = false
+        introPlayer.volume = 1
+        introPlayer.replaceCurrentItem(with: item)
+        introPlayer.play()
+        NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: item)
+            .merge(with: NotificationCenter.default.publisher(for: AVPlayerItem.failedToPlayToEndTimeNotification, object: item))
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.finishIntro() }
+            .store(in: &introBag)
+        item.publisher(for: \.status)
+            .filter { $0 == .failed }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.finishIntro() }
+            .store(in: &introBag)
+        // La intro termina en negro: el contenido arranca un instante antes para que no haya corte.
+        introTimeObserver = introPlayer.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main) { [weak self] time in
+            let seconds = time.seconds
+            Task { @MainActor in self?.introTick(seconds) }
+        }
+        introTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, self.introActive else { return }
+            if self.introPlayer.currentTime().seconds < 0.5 { self.finishIntro(); return }
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            if self.introActive { self.finishIntro() }
+        }
+    }
+
+    private func introTick(_ seconds: Double) {
+        guard introActive, let duration = introPlayer.currentItem?.duration.seconds,
+              duration.isFinite, duration > 0, seconds.isFinite, duration - seconds <= 0.35 else { return }
+        finishIntro()
+    }
+
+    /// Suelta el contenido precargado y funde la intro cuando ya se ve el primer fotograma.
+    private func finishIntro() {
+        guard introActive else { return }
+        introActive = false
+        introTask?.cancel()
+        introBag = []
+        if let o = introTimeObserver { introPlayer.removeTimeObserver(o) }
+        introTimeObserver = nil
+        guard !closed else { return }
+        if case .failed = phase {
+            endIntroNow()
+            return
+        }
+        play()
+        introTask = Task { @MainActor [weak self] in
+            for _ in 0..<40 {
+                guard let self, !Task.isCancelled else { return }
+                if self.isPlaying || self.hasVideo { break }
+                if case .failed = self.phase { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.introVisible = false
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
+            self.introPlayer.pause()
+            self.introPlayer.replaceCurrentItem(with: nil)
+        }
+    }
+
+    private func endIntroNow() {
+        introTask?.cancel()
+        introTask = nil
+        introBag = []
+        if let o = introTimeObserver { introPlayer.removeTimeObserver(o) }
+        introTimeObserver = nil
+        introActive = false
+        introVisible = false
+        introPlayer.pause()
+        introPlayer.replaceCurrentItem(with: nil)
     }
 
     /// El vídeo arranca con sonido aunque el iPhone esté en modo silencio.
@@ -948,6 +1045,7 @@ final class PlayerController: NSObject, ObservableObject {
         removeItemObservers()
         player.replaceCurrentItem(with: nil)
         resetTrackState()
+        introPending = true
         Task { await start() }
     }
 
@@ -1030,6 +1128,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func fail(message: String, code: String) {
+        if introActive || introVisible { endIntroNow() }
         switchingItem = false
         waitingForNetwork = false
         phase = .failed(message: message, code: code)
@@ -1378,6 +1477,7 @@ final class PlayerController: NSObject, ObservableObject {
         meterTask = nil
         if started { report("stop") }
         closed = true
+        endIntroNow()
         stopHeartbeat()
         pip?.stopPictureInPicture()
         stopVLC()
