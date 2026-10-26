@@ -127,6 +127,12 @@ struct PlayerView: View {
                 if controller.phase == .ended {
                     endedView
                 }
+
+                PlayerLayerView(player: controller.introPlayer, gravity: .resizeAspect) { _ in }
+                    .ignoresSafeArea()
+                    .opacity(controller.introVisible ? 1 : 0)
+                    .allowsHitTesting(controller.introVisible)
+                    .animation(.easeOut(duration: 0.8), value: controller.introVisible)
             }
             .animation(.easeOut(duration: 0.35), value: showLoadingScreen)
             .animation(.easeOut(duration: 0.25), value: controlsVisible)
